@@ -275,3 +275,22 @@ def cancel_order(order_id: str) -> dict:
 
 def get_order(order_id: str) -> dict:
     return run("order", "get", order_id)
+
+
+def stock_bars(symbol: str, *, start: str, timeframe: str = "1Day",
+               limit: int = 300, adjustment: str = "split") -> list[dict]:
+    """Daily bars for the underlying — the realized-volatility input.
+
+    `--adjustment split` matters: raw prices put a fake ~50% one-day return in
+    the series at every split, which would read as a volatility spike.
+    """
+    payload = run("data", "bars", "--symbol", symbol, "--start", start,
+                  "--timeframe", timeframe, "--limit", str(limit),
+                  "--adjustment", adjustment)
+    if isinstance(payload, dict):
+        bars = payload.get("bars")
+        if isinstance(bars, dict):
+            return bars.get(symbol) or []
+        if isinstance(bars, list):
+            return bars
+    return []
