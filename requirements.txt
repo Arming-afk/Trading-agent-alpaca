@@ -1,0 +1,15 @@
+# The agent talks to Alpaca through the official Go CLI (subprocess + JSON),
+# not through a Python SDK — see agent/cli.py. Nothing here is an Alpaca client.
+python-dotenv>=1.0.0
+pandas>=2.2.0
+numpy>=1.26.0
+
+# LLM narrative layer (optional; the agent runs without it)
+openai>=1.0.0
+
+# dashboard
+streamlit>=1.30.0
+plotly>=5.18.0
+
+# tests
+pytest>=8.0.0

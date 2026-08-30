@@ -1,0 +1,25 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+~/.config/alpaca/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# tools vendored at setup time
+.tools/
+
+# local scratch
+.DS_Store
+scratch/
+
+# NOTE: logs/ is intentionally NOT ignored. The agent's decision and run
+# records are the audit trail the hackathon judges P&L against, so they are
+# committed by the daily workflow on purpose.
