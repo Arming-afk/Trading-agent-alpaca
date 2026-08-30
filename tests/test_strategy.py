@@ -4,7 +4,7 @@ import pytest
 
 from agent import spreads, strategy
 from agent.strategy import (BUY_PREMIUM, SELL_PREMIUM, STAND_ASIDE, classify,
-                            propose, select_legs, spread_kind_for)
+                            consider, propose, select_legs, spread_kind_for)
 from tests.conftest import EXP, contract
 
 TODAY = date(2026, 9, 1)          # 17 DTE to EXP
@@ -227,3 +227,59 @@ class TestPropose:
         assert 0 < cand.spread.max_loss < float("inf")
         assert cand.spread.max_loss + cand.spread.max_gain == pytest.approx(
             cand.spread.width * spreads.MULTIPLIER)
+
+
+class TestConsiderReasons:
+    """The journal is the audit trail, so a decline has to say what actually
+    stopped the trade — not repeat whatever the regime happened to say."""
+
+    def test_a_trade_reports_its_rationale(self):
+        regime = classify("AAPL", implied=0.40, realized=0.25, closes=RISING)
+        p = consider(regime, chain_around(100, "put"), spot=100, today=TODAY)
+        assert p and p.candidate is not None
+        assert "bull_put_credit" in p.reason
+
+    def test_standing_aside_reports_the_regime_reason(self):
+        regime = classify("AAPL", implied=0.26, realized=0.25, closes=RISING)
+        p = consider(regime, chain_around(100, "put"), spot=100, today=TODAY)
+        assert not p
+        assert "no edge claimed" in p.reason
+
+    def test_a_neutral_trend_says_so_rather_than_blaming_the_regime(self):
+        """The bug this replaced: a symbol declined for having no directional
+        view was logged as 'premium is cheap', which is what the regime said,
+        not what the agent did."""
+        flat = [100.0] * 40
+        regime = classify("AAPL", implied=0.18, realized=0.25, closes=flat)
+        assert regime.stance == BUY_PREMIUM and regime.bias == "neutral"
+        p = consider(regime, chain_around(100, "call"), spot=100, today=TODAY)
+        assert not p
+        assert "directional" in p.reason and "neutral" in p.reason
+
+    def test_an_illiquid_chain_says_the_liquidity_gate_stopped_it(self):
+        wide = [contract(s, "put", bid=3.00, ask=6.00, delta=-0.20, oi=5000)
+                for s in (85, 90, 95, 100)]
+        regime = classify("AAPL", implied=0.40, realized=0.25, closes=RISING)
+        p = consider(regime, wide, spot=100, today=TODAY)
+        assert not p
+        assert "liquidity gate" in p.reason
+
+    def test_a_thin_credit_reports_its_reward_risk(self):
+        """A 1-wide credit spread collecting a couple of cents."""
+        legs = [contract(95, "put", bid=0.30, ask=0.31, delta=-0.19, oi=5000),
+                contract(96, "put", bid=0.33, ask=0.34, delta=-0.21, oi=5000)]
+        regime = classify("AAPL", implied=0.40, realized=0.25, closes=RISING)
+        p = consider(regime, legs, spot=100, today=TODAY)
+        assert not p
+        assert "credit too thin" in p.reason
+
+    def test_a_proposal_is_falsy_when_it_carries_no_trade(self):
+        regime = classify("AAPL", implied=0.26, realized=0.25, closes=RISING)
+        p = consider(regime, chain_around(100, "put"), spot=100, today=TODAY)
+        assert bool(p) is False
+        assert p.candidate is None
+
+    def test_propose_still_returns_the_bare_candidate(self):
+        regime = classify("AAPL", implied=0.40, realized=0.25, closes=RISING)
+        assert propose(regime, chain_around(100, "put"), spot=100,
+                       today=TODAY) is not None

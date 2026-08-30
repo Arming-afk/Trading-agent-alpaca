@@ -24,17 +24,29 @@ logger = logging.getLogger(__name__)
 
 
 def spot_price(symbol: str) -> float | None:
-    """Mid of the latest NBBO quote for the underlying."""
+    """Reference price for the underlying: quote mid, else the last close.
+
+    The fallback is not cosmetic. Outside regular hours one side of the NBBO is
+    routinely withdrawn — AAPL quoted 300.93 bid / 0.00 ask at Friday's close —
+    and requiring both sides makes the agent blind to a symbol for reasons that
+    have nothing to do with whether it is worth trading. A one-sided quote still
+    tells us where the stock is; the daily close tells us too.
+    """
     try:
         quote = cli.latest_stock_quote(symbol)
     except cli.AlpacaCLIError as exc:
         logger.warning("spot quote failed for %s: %s", symbol, exc)
-        return None
+        quote = {}
+
     bid = float(quote.get("bp") or 0)
     ask = float(quote.get("ap") or 0)
-    if bid <= 0 or ask <= 0:
-        return None
-    return (bid + ask) / 2
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    if bid > 0 or ask > 0:
+        return bid or ask
+
+    closes = recent_closes(symbol, days=5)
+    return closes[-1] if closes else None
 
 
 def recent_closes(symbol: str, *, days: int = 60) -> list[float]:

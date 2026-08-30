@@ -40,11 +40,27 @@ from agent import spreads, vol
 from agent.chain import Contract, by_delta, by_strike, is_tradable
 from agent.spreads import Vertical
 
-# ── regime thresholds (a-priori; see README on why these are not tuned) ──────
+# ── regime thresholds ────────────────────────────────────────────────────────
+# Set a-priori from the documented behaviour of the variance risk premium, and
+# corrected once — before any order was placed — when a dry run showed the first
+# numbers firing on the ordinary case instead of the exceptional one.
+#
+# The premium is normally *positive*: implied has historically run a few vol
+# points above subsequent realized, so a typical IV/RV reading sits above 1.0,
+# not at it. The first pass used 0.95 as "cheap", which is roughly the middle of
+# the normal range — six of eight symbols produced a trade, five of them debit
+# spreads bought on the claim that premium was unusually cheap when it was
+# merely unremarkable. Thresholds now sit outside the ordinary band on both
+# sides, so a signal means the surface is genuinely dislocated.
+#
+# This is a calibration against published behaviour, not a fit to results: no
+# order had been submitted when it was made, and it is not revisited on the
+# strength of the competition's P&L.
+
 #: Above this, implied vol is rich enough relative to realized to sell.
-RICH_RATIO = 1.25
+RICH_RATIO = 1.30
 #: Below this, options are cheap enough relative to realized to buy.
-CHEAP_RATIO = 0.95
+CHEAP_RATIO = 0.85
 
 #: Short leg of a credit spread sits around this delta — roughly a 4-in-5
 #: chance of expiring worthless, before accounting for the premium collected.
@@ -98,6 +114,24 @@ class Regime:
             "stance": self.stance,
             "reason": self.reason,
         }
+
+
+@dataclass
+class Proposal:
+    """The outcome of considering one symbol: a trade, or a stated reason there
+    is none.
+
+    Returning a bare None here was actively misleading in the journal. The
+    runner had nothing to log but the regime's own text, so a symbol declined
+    for having no directional view was recorded as "premium is cheap" — which
+    is what the regime said, not what the agent did. The log is the audit trail
+    the competition is judged against; it has to say the real reason.
+    """
+    candidate: "Candidate | None"
+    reason: str
+
+    def __bool__(self) -> bool:
+        return self.candidate is not None
 
 
 @dataclass
@@ -263,43 +297,48 @@ def _strike_increment(strikes: list[float]) -> float:
     return max(set(gaps), key=gaps.count)
 
 
-def propose(regime: Regime, contracts: list[Contract], spot: float,
-            *, today: date | None = None) -> Candidate | None:
-    """Turn a regime reading into a concrete, priced spread — or nothing.
+def consider(regime: Regime, contracts: list[Contract], spot: float,
+             *, today: date | None = None) -> Proposal:
+    """Turn a regime reading into a concrete, priced spread — or a stated reason
+    there is none. Declining is a normal outcome, not an error."""
+    if regime.stance == STAND_ASIDE:
+        return Proposal(None, regime.reason)
 
-    Returns None whenever the regime says stand aside, the chain cannot supply
-    two tradable strikes, or the resulting spread is priced nonsensically. The
-    caller then records the reason and moves on; a missing candidate is a normal
-    outcome, not an error.
-    """
     kind = spread_kind_for(regime.stance, regime.bias)
     if kind is None:
-        return None
+        return Proposal(None, "buying premium needs a directional view; trend is neutral")
 
     tradable = [c for c in contracts if is_tradable(c, today=today)]
+    if not tradable:
+        return Proposal(None, f"no contract passed the liquidity gate ({len(contracts)} seen)")
+
     option_type = _option_type_for(kind)
     expiry = best_expiry([c for c in tradable if c.kind == option_type],
                          TARGET_DTE, today=today)
     if expiry is None:
-        return None
+        return Proposal(None, f"no {option_type} expiry with enough liquid strikes")
+
     legs = select_legs(kind, tradable, spot, expiration=expiry, today=today)
     if legs is None:
-        return None
+        return Proposal(None, f"could not place two strikes on {expiry}")
 
     try:
         spread = spreads.build(kind, list(legs))
-    except ValueError:
-        return None
+    except ValueError as exc:
+        return Proposal(None, f"spread rejected: {exc}")
 
-    notes = []
     # A credit spread that collects nothing carries the full width as risk for
     # no compensation; a debit spread priced at the full width has no upside.
     if spread.max_gain <= 0 or spread.max_loss <= 0:
-        return None
+        return Proposal(None, "spread is priced with no upside or no risk — bad quotes")
     if spread.kind in spreads.CREDIT_KINDS and spread.reward_risk < MIN_CREDIT_REWARD_RISK:
         # Not a warning. Collecting $1 against $99 of risk is a losing structure
         # however often it expires worthless.
-        return None
+        return Proposal(None,
+                        f"credit too thin: reward/risk {spread.reward_risk:.2f} "
+                        f"< {MIN_CREDIT_REWARD_RISK:.2f}")
+
+    notes = []
     if spread.worst_spread_pct > 15:
         notes.append(f"wide market on a leg: {spread.worst_spread_pct:.1f}%")
 
@@ -308,4 +347,12 @@ def propose(regime: Regime, contracts: list[Contract], spot: float,
         f"{spread.long_leg.strike:g}/{spread.short_leg.strike:g} "
         f"{spread.long_leg.expiration:%Y-%m-%d}"
     )
-    return Candidate(regime=regime, spread=spread, rationale=rationale, notes=notes)
+    return Proposal(Candidate(regime=regime, spread=spread, rationale=rationale,
+                              notes=notes), rationale)
+
+
+def propose(regime: Regime, contracts: list[Contract], spot: float,
+            *, today: date | None = None) -> Candidate | None:
+    """`consider()` without the reason — kept for callers that only need the
+    trade."""
+    return consider(regime, contracts, spot, today=today).candidate
