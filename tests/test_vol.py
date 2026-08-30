@@ -62,14 +62,15 @@ class TestATM:
     def test_returns_none_on_an_empty_chain(self):
         assert vol.atm_contract([], 100) is None
 
-    def test_atm_iv_reads_the_iv_of_the_atm_symbol(self):
-        chain = [contract(100), contract(105)]
-        ivs = {chain[0].symbol: 0.28, chain[1].symbol: 0.31}
-        assert vol.atm_iv(chain, 100, ivs) == pytest.approx(0.28)
+    def test_atm_iv_reads_the_iv_of_the_atm_contract(self):
+        chain = [contract(100, iv=0.28), contract(105, iv=0.31)]
+        assert vol.atm_iv(chain, 100) == pytest.approx(0.28)
 
-    def test_atm_iv_is_none_when_that_symbol_has_no_iv(self):
-        chain = [contract(100)]
-        assert vol.atm_iv(chain, 100, {}) is None
+    def test_atm_iv_is_none_when_the_atm_contract_has_no_iv(self):
+        assert vol.atm_iv([contract(100)], 100) is None
+
+    def test_atm_iv_is_none_on_a_nonpositive_iv(self):
+        assert vol.atm_iv([contract(100, iv=0.0)], 100) is None
 
 
 class TestTrendBias:

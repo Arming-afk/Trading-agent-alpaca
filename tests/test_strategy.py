@@ -127,6 +127,38 @@ class TestSelectLegs:
                                          spot=100, today=TODAY)
         assert anchor.kind == protective.kind == "put"
 
+    def test_both_legs_come_from_a_single_expiry(self):
+        """Regression, found against the live API: a liquid underlying lists
+        several expiries inside the DTE window. Selecting the anchor by delta
+        across all of them and the protective strike separately produced legs
+        from different weeks — not a vertical at all, and a max_loss that does
+        not describe the position."""
+        near = chain_around(100, "put")
+        far = [contract(c.strike, "put", bid=c.bid, ask=c.ask, delta=c.delta,
+                        oi=5000, expiration=date(2026, 9, 25)) for c in near]
+        anchor, protective = select_legs(spreads.BULL_PUT_CREDIT, near + far,
+                                         spot=100, today=TODAY)
+        assert anchor.expiration == protective.expiration
+
+    def test_an_explicit_expiration_is_honoured(self):
+        near = chain_around(100, "put")
+        far = [contract(c.strike, "put", bid=c.bid, ask=c.ask, delta=c.delta,
+                        oi=5000, expiration=date(2026, 9, 25)) for c in near]
+        anchor, protective = select_legs(spreads.BULL_PUT_CREDIT, near + far,
+                                         spot=100, expiration=date(2026, 9, 25),
+                                         today=TODAY)
+        assert anchor.expiration == protective.expiration == date(2026, 9, 25)
+
+    def test_a_multi_expiry_chain_still_yields_a_buildable_spread(self):
+        """The end-to-end guard: propose() must survive the same chain shape."""
+        near = chain_around(100, "put")
+        far = [contract(c.strike, "put", bid=c.bid, ask=c.ask, delta=c.delta,
+                        oi=5000, expiration=date(2026, 9, 25)) for c in near]
+        regime = classify("AAPL", implied=0.40, realized=0.25, closes=RISING)
+        cand = propose(regime, near + far, spot=100, today=TODAY)
+        assert cand is not None
+        assert cand.spread.long_leg.expiration == cand.spread.short_leg.expiration
+
     def test_returns_none_when_the_chain_is_too_thin_to_build_a_spread(self):
         assert select_legs(spreads.BULL_PUT_CREDIT, [contract(100, "put")],
                            spot=100, today=TODAY) is None

@@ -112,3 +112,18 @@ class TestSnapshotParsing:
     def test_missing_greeks_leave_delta_none_rather_than_zero(self):
         c = from_snapshot("AAPL260918C00190000", {"latestQuote": {"bp": 1, "ap": 2}})
         assert c.delta is None
+
+    def test_implied_vol_is_read_from_beside_greeks_not_inside_it(self):
+        """Regression: Alpaca returns impliedVolatility as a sibling of greeks.
+        Reading it from inside greeks silently yields None for every contract,
+        which would make the whole IV/RV strategy stand aside forever."""
+        c = from_snapshot("AAPL260918C00190000", {
+            "latestQuote": {"bp": 1.0, "ap": 1.1},
+            "greeks": {"delta": 0.42},
+            "impliedVolatility": 0.2734,
+        })
+        assert c.implied_vol == pytest.approx(0.2734)
+
+    def test_a_snapshot_without_implied_vol_leaves_it_none(self):
+        c = from_snapshot("AAPL260918C00190000", {"latestQuote": {"bp": 1, "ap": 2}})
+        assert c.implied_vol is None

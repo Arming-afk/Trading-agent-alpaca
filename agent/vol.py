@@ -53,14 +53,16 @@ def atm_contract(contracts: list[Contract], spot: float) -> Contract | None:
     return min(priced, key=lambda c: abs(c.strike - spot))
 
 
-def atm_iv(contracts: list[Contract], spot: float,
-           iv_by_symbol: dict[str, float]) -> float | None:
-    """Implied vol of the at-the-money contract, as a decimal (0.28 = 28%)."""
+def atm_iv(contracts: list[Contract], spot: float) -> float | None:
+    """Implied vol of the at-the-money contract, as a decimal (0.28 = 28%).
+
+    Alpaca returns `impliedVolatility` alongside `greeks` in a chain snapshot
+    rather than inside it, so Contract carries it directly.
+    """
     atm = atm_contract(contracts, spot)
-    if atm is None:
+    if atm is None or not atm.implied_vol or atm.implied_vol <= 0:
         return None
-    iv = iv_by_symbol.get(atm.symbol)
-    return float(iv) if iv and iv > 0 else None
+    return atm.implied_vol
 
 
 def variance_premium(implied: float | None, realized: float | None) -> float | None:

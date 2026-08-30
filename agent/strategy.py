@@ -56,6 +56,22 @@ LONG_LEG_DELTA = 0.50
 #: that decay is meaningful inside a one-week competition.
 TARGET_DTE = 21
 
+#: Strike distance between the legs, as a percentage of spot. The raw listed
+#: increment is the wrong default: SPY lists $1 strikes on a ~$770 underlying,
+#: so a one-increment spread risks the full width to collect a few cents. Width
+#: has to scale with the price of the underlying, not with the strike grid.
+SPREAD_WIDTH_PCT = 1.0
+
+#: An expiry needs at least this many liquid strikes to be worth trading —
+#: fewer means strike selection is choosing among whatever survived, not among
+#: what it wants.
+MIN_STRIKES_PER_EXPIRY = 6
+
+#: A credit spread must pay at least this fraction of its risk. Below it the
+#: structure is collecting pennies in front of the full width — the shape of
+#: trade that wins repeatedly and then gives it all back at once.
+MIN_CREDIT_REWARD_RISK = 0.15
+
 SELL_PREMIUM = "sell_premium"
 BUY_PREMIUM = "buy_premium"
 STAND_ASIDE = "stand_aside"
@@ -141,16 +157,33 @@ def _option_type_for(kind: str) -> str:
 
 def select_legs(kind: str, contracts: list[Contract], spot: float,
                 *, width_target: float | None = None,
+                expiration: date | None = None,
                 today: date | None = None) -> tuple[Contract, Contract] | None:
     """Pick the two strikes for `kind` from an already liquidity-filtered chain.
+
+    Both legs are drawn from a **single expiry**. This is not a detail: a liquid
+    underlying lists several expiries inside any DTE window, and picking the
+    anchor by delta across all of them lands on one expiry while the protective
+    strike search lands on another. The result is not a vertical at all — the
+    legs do not offset, so `max_loss` would be a fiction and every risk gate
+    downstream would be sizing against a number that does not describe the
+    position. `spreads.Vertical` rejects mismatched expirations for the same
+    reason; this filter is what stops that rejection from being the normal path.
 
     The anchor leg is chosen by delta when the chain carries greeks and by
     moneyness otherwise, so a chain without greeks degrades to a wider but still
     valid selection instead of failing outright.
     """
     option_type = _option_type_for(kind)
-    pool = [c for c in contracts if c.kind == option_type]
-    if len(pool) < 2 or spot <= 0:
+    typed = [c for c in contracts if c.kind == option_type]
+    if len(typed) < 2 or spot <= 0:
+        return None
+
+    expiry = expiration or best_expiry(typed, TARGET_DTE, today=today)
+    if expiry is None:
+        return None
+    pool = [c for c in typed if c.expiration == expiry]
+    if len(pool) < 2:
         return None
 
     is_credit = kind in spreads.CREDIT_KINDS
@@ -171,7 +204,15 @@ def select_legs(kind: str, contracts: list[Contract], spot: float,
     # The protective leg sits further out of the money, one strike increment
     # away by default so the defined risk stays small.
     strikes = sorted({c.strike for c in pool})
-    increment = _strike_increment(strikes) if width_target is None else width_target
+    grid = _strike_increment(strikes)
+    if grid <= 0:
+        return None
+    if width_target is not None:
+        increment = width_target
+    else:
+        # Scale the width to the underlying, then snap it to the listed grid.
+        wanted = spot * SPREAD_WIDTH_PCT / 100
+        increment = max(grid, round(wanted / grid) * grid)
     if increment <= 0:
         return None
 
@@ -187,6 +228,29 @@ def select_legs(kind: str, contracts: list[Contract], spot: float,
         return None
 
     return anchor, protective
+
+
+def best_expiry(contracts: list[Contract], target_dte: int = TARGET_DTE,
+                today: date | None = None,
+                min_strikes: int = MIN_STRIKES_PER_EXPIRY) -> date | None:
+    """The expiry to trade: nearest to `target_dte` among those with enough
+    liquid strikes to choose from.
+
+    Proximity alone is the wrong rule. When no listed expiry sits near the
+    target, the nearest one can be a thin weekly with a handful of surviving
+    strikes, and strike selection then picks the least-bad of those rather than
+    the one it actually wants. Requiring depth first keeps the choice on the
+    monthlies, where the markets are.
+    """
+    counts: dict[date, int] = {}
+    for c in contracts:
+        counts[c.expiration] = counts.get(c.expiration, 0) + 1
+    if not counts:
+        return None
+    ref = today or date.today()
+    deep = [e for e, n in counts.items() if n >= min_strikes]
+    pool = deep or list(counts)
+    return min(pool, key=lambda e: abs((e - ref).days - target_dte))
 
 
 def _strike_increment(strikes: list[float]) -> float:
@@ -213,7 +277,12 @@ def propose(regime: Regime, contracts: list[Contract], spot: float,
         return None
 
     tradable = [c for c in contracts if is_tradable(c, today=today)]
-    legs = select_legs(kind, tradable, spot, today=today)
+    option_type = _option_type_for(kind)
+    expiry = best_expiry([c for c in tradable if c.kind == option_type],
+                         TARGET_DTE, today=today)
+    if expiry is None:
+        return None
+    legs = select_legs(kind, tradable, spot, expiration=expiry, today=today)
     if legs is None:
         return None
 
@@ -227,8 +296,10 @@ def propose(regime: Regime, contracts: list[Contract], spot: float,
     # no compensation; a debit spread priced at the full width has no upside.
     if spread.max_gain <= 0 or spread.max_loss <= 0:
         return None
-    if spread.kind in spreads.CREDIT_KINDS and spread.reward_risk < 0.15:
-        notes.append(f"thin credit: reward/risk {spread.reward_risk:.2f}")
+    if spread.kind in spreads.CREDIT_KINDS and spread.reward_risk < MIN_CREDIT_REWARD_RISK:
+        # Not a warning. Collecting $1 against $99 of risk is a losing structure
+        # however often it expires worthless.
+        return None
     if spread.worst_spread_pct > 15:
         notes.append(f"wide market on a leg: {spread.worst_spread_pct:.1f}%")
 

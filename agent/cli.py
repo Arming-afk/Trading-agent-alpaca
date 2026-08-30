@@ -175,16 +175,27 @@ def option_contracts(underlying: str, *, expiration_gte: str, expiration_lte: st
 
 
 def option_chain(underlying: str, *, expiration: str | None = None,
+                 expiration_gte: str | None = None,
+                 expiration_lte: str | None = None,
                  contract_type: str | None = None,
                  strike_gte: float | None = None,
                  strike_lte: float | None = None,
                  limit: int = 500) -> dict[str, dict]:
-    """`alpaca data option chain` — latest quote, latest trade and greeks keyed
-    by OCC contract symbol."""
+    """`alpaca data option chain` — latest quote, latest trade, implied vol and
+    greeks, keyed by OCC contract symbol.
+
+    Pass the expiry range. Without it the endpoint returns whatever fits under
+    `--limit`, which is the nearest weeklies — so the liquid monthly expiry is
+    never seen and strike selection is left choosing among thin contracts.
+    """
     args = ["data", "option", "chain", "--underlying-symbol", underlying,
             "--limit", str(limit)]
     if expiration:
         args += ["--expiration-date", expiration]
+    if expiration_gte:
+        args += ["--expiration-date-gte", expiration_gte]
+    if expiration_lte:
+        args += ["--expiration-date-lte", expiration_lte]
     if contract_type:
         args += ["--type", contract_type]
     if strike_gte is not None:

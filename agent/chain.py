@@ -29,6 +29,9 @@ class Contract:
     bid: float = 0.0
     ask: float = 0.0
     delta: float | None = None
+    #: Implied vol as a decimal (0.28 = 28%). Alpaca returns this as a
+    #: sibling of `greeks`, not a member of it.
+    implied_vol: float | None = None
     open_interest: int = 0
 
     @property
@@ -66,6 +69,7 @@ def from_snapshot(symbol: str, snapshot: dict, *, open_interest: int = 0) -> Con
     underlying, expiration, kind, strike = parse_occ(symbol)
     quote = snapshot.get("latestQuote") or snapshot.get("latest_quote") or {}
     greeks = snapshot.get("greeks") or {}
+    iv = snapshot.get("impliedVolatility", snapshot.get("implied_volatility"))
     return Contract(
         symbol=symbol,
         underlying=underlying,
@@ -75,6 +79,7 @@ def from_snapshot(symbol: str, snapshot: dict, *, open_interest: int = 0) -> Con
         bid=float(quote.get("bp") or quote.get("bid_price") or 0.0),
         ask=float(quote.get("ap") or quote.get("ask_price") or 0.0),
         delta=(float(greeks["delta"]) if greeks.get("delta") is not None else None),
+        implied_vol=(float(iv) if iv else None),
         open_interest=open_interest,
     )
 
