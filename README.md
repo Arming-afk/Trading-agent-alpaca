@@ -201,6 +201,32 @@ python3 scripts/daily_run.py --dry-run --force
 writes every log, but submits nothing. Scheduled workflow runs set it to `1`;
 manual dispatches default to a dry run.
 
+## Dashboard
+
+```bash
+streamlit run dashboard/app.py
+```
+
+Shows the equity curve, the latest volatility scan, and the full decision table
+— every symbol considered, with the reason it was or was not traded. It reads
+the committed logs and, when the CLI is installed, live account state; on a host
+without the CLI it degrades to the logs alone rather than failing.
+
+To deploy it as a public demo URL, point
+[Streamlit Community Cloud](https://share.streamlit.io) at this repository with
+`dashboard/app.py` as the entry point. No secrets are needed — the logs are
+public and the live panel simply hides itself.
+
+## Watching a live run
+
+```bash
+python3 scripts/watch.py --until-settled
+```
+
+Polls orders, fills and open spreads. Written for the first real submission: a
+dry run proves the request body is right, but only a live book shows whether a
+multi-leg limit fills and how far from the mid it has to sit to do it.
+
 ## Tests
 
 ```bash
