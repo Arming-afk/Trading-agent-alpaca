@@ -184,21 +184,81 @@ class TestLegsPayload:
 
 
 class TestLimitPrice:
-    def test_a_debit_limit_sits_above_mid(self):
-        s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
-        assert s.limit_price(slippage_pct=5) > abs(s.net_mid)
+    """Legs are quoted 0.10 wide by the helpers, so on a two-leg spread the
+    mid-to-natural distance is 0.10: mid 2.00, natural 2.10 for the debit."""
 
-    def test_a_credit_limit_sits_below_mid(self):
+    def test_natural_price_crosses_both_markets(self):
+        s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
+        # buy the 100c at 5.05, sell the 105c at 2.95 → 2.10
+        assert s.natural_price == pytest.approx(2.10)
+
+    def test_a_credit_natural_is_the_worse_credit(self):
         s = build(BULL_PUT_CREDIT, [put(95, 1.50), put(100, 3.00)])
-        assert s.limit_price(slippage_pct=5) < abs(s.net_mid)
+        # sell the 100p at 2.95, buy the 95p at 1.55 → 1.40 vs a 1.50 mid
+        assert s.natural_price == pytest.approx(1.40)
+
+    def test_zero_aggression_prices_at_mid(self):
+        s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
+        assert s.limit_price(aggression=0) == pytest.approx(2.00)
+
+    def test_full_aggression_prices_at_natural(self):
+        s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
+        assert s.limit_price(aggression=1) == pytest.approx(2.10)
+
+    def test_half_aggression_splits_the_distance(self):
+        s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
+        assert s.limit_price(aggression=0.5) == pytest.approx(2.05)
+
+    def test_a_debit_limit_sits_between_mid_and_natural(self):
+        s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
+        assert abs(s.net_mid) <= s.limit_price(0.5) <= s.natural_price
+
+    def test_a_credit_limit_sits_between_natural_and_mid(self):
+        s = build(BULL_PUT_CREDIT, [put(95, 1.50), put(100, 3.00)])
+        assert s.natural_price <= s.limit_price(0.5) <= abs(s.net_mid)
+
+    def test_the_concession_scales_with_the_width_of_the_market(self):
+        """The reason this replaced a percentage of mid. Two spreads with the
+        same mid but different market widths must concede different amounts."""
+        tight = build(BULL_CALL_DEBIT,
+                      [contract(100, "call", bid=4.99, ask=5.01),
+                       contract(105, "call", bid=2.99, ask=3.01)])
+        wide = build(BULL_CALL_DEBIT,
+                     [contract(100, "call", bid=4.60, ask=5.40),
+                      contract(105, "call", bid=2.60, ask=3.40)])
+        assert abs(tight.net_mid) == pytest.approx(abs(wide.net_mid))
+        assert tight.limit_price(0.5) < wide.limit_price(0.5)
+
+    def test_a_debit_rounds_up_so_it_is_never_less_marketable(self):
+        s = build(BULL_CALL_DEBIT,
+                  [contract(100, "call", bid=4.99, ask=5.02),
+                   contract(105, "call", bid=2.99, ask=3.02)])
+        # mid 2.005, natural 2.03 → half is 2.0175, must not round down to 2.01
+        assert s.limit_price(0.5) == pytest.approx(2.02)
+
+    def test_a_credit_rounds_down_so_it_is_never_less_marketable(self):
+        s = build(BULL_PUT_CREDIT,
+                  [contract(95, "put", bid=1.48, ask=1.52),
+                   contract(100, "put", bid=2.98, ask=3.02)])
+        # mid 1.50, natural 1.46 → half is 1.48; rounding must not lift it
+        assert s.limit_price(0.5) <= 1.48
 
     def test_the_limit_is_always_a_positive_net_price(self):
         s = build(BULL_PUT_CREDIT, [put(95, 1.50), put(100, 3.00)])
         assert s.limit_price() > 0
 
-    def test_zero_slippage_prices_at_mid(self):
+    def test_a_credit_worth_nothing_at_natural_still_prices_above_zero(self):
+        """Legs so wide that crossing both would pay nothing — the order must
+        still carry a legal price rather than 0.00."""
+        s = build(BULL_PUT_CREDIT,
+                  [contract(95, "put", bid=0.10, ask=3.00),
+                   contract(100, "put", bid=0.20, ask=3.10)])
+        assert s.limit_price(1.0) >= 0.01
+
+    def test_aggression_is_clamped_to_the_unit_interval(self):
         s = build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)])
-        assert s.limit_price(slippage_pct=0) == pytest.approx(2.00)
+        assert s.limit_price(5.0) == pytest.approx(s.limit_price(1.0))
+        assert s.limit_price(-2.0) == pytest.approx(s.limit_price(0.0))
 
 
 class TestSizing:

@@ -9,6 +9,7 @@ would make every portfolio-level guard in this project a guess.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from agent.chain import Contract
@@ -113,17 +114,42 @@ class Vertical:
              "ratio_qty": 1, "position_intent": short_intent},
         ]
 
-    def limit_price(self, slippage_pct: float = 5.0) -> float:
-        """Limit price for the spread, walked slightly away from mid so the
-        order can actually fill without paying the full width of both markets.
-
-        For a debit we are willing to pay a little above mid; for a credit we
-        accept a little below. `--type limit` on an mleg order prices the net
-        of the package, always as a positive number.
+    @property
+    def natural_price(self) -> float:
+        """The immediately marketable net price: what you get if you cross both
+        markets — pay the ask on the leg you buy, hit the bid on the leg you
+        sell. The worst price the package can trade at right now.
         """
-        net = abs(self.net_mid)
-        adjusted = net * (1 + slippage_pct / 100) if self.is_debit else net * (1 - slippage_pct / 100)
-        return max(round(adjusted, 2), 0.01)
+        crossed = self.long_leg.ask - self.short_leg.bid
+        return abs(crossed) if self.is_debit else max(
+            self.short_leg.bid - self.long_leg.ask, 0.0)
+
+    def limit_price(self, aggression: float = 0.5) -> float:
+        """Net limit for the package, walked from mid toward the marketable
+        price by `aggression` (0 = mid, 1 = cross both markets).
+
+        A percentage of mid — which this used to be — is the wrong parameter,
+        because it has no idea how wide the market actually is. Five percent of
+        a $0.40 credit is four cents, which on a pair of legs quoted a dime wide
+        will simply never fill; five percent of a $3.60 debit is eighteen cents,
+        which on tight legs gives away more than it needs to. Both errors come
+        from measuring the concession against the price instead of against the
+        spread we are trying to cross.
+
+        Walking a fraction of the mid-to-natural distance scales with the actual
+        market: tight legs concede pennies, wide legs concede what they must.
+        Rounding follows the direction of risk — a debit rounds up and a credit
+        rounds down, so the order is never quietly less marketable than intended.
+        """
+        aggression = min(max(aggression, 0.0), 1.0)
+        mid, natural = abs(self.net_mid), self.natural_price
+
+        if self.is_debit:
+            target = mid + (natural - mid) * aggression
+            return max(math.ceil(target * 100) / 100, 0.01)
+
+        target = mid - (mid - natural) * aggression
+        return max(math.floor(target * 100) / 100, 0.01)
 
     def describe(self) -> str:
         a, b = self.long_leg, self.short_leg

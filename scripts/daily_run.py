@@ -51,6 +51,11 @@ def parse_args(argv=None):
                    help="run even when the market is closed (selection only)")
     p.add_argument("--universe", default=None,
                    help="comma-separated symbols, overriding UNIVERSE")
+    p.add_argument("--max-contracts", type=int, default=None,
+                   help="hard cap on contracts per spread, below whatever the "
+                        "risk budget allows — for a supervised first live run")
+    p.add_argument("--aggression", type=float, default=0.5,
+                   help="0 prices at mid, 1 crosses both markets (default 0.5)")
     return p.parse_args(argv)
 
 
@@ -206,6 +211,8 @@ def main(argv=None) -> int:
         risk_log = {"allowed": verdict.allowed, "budget": round(verdict.risk_budget, 2),
                     "blocked_by": verdict.blocked_by, "detail": verdict.reason(),
                     "open_risk": round(open_risk, 2)}
+        if args.max_contracts is not None:
+            risk_log["max_contracts_cap"] = args.max_contracts
         if not verdict.allowed:
             journal.log_decision(symbol=cand.regime.symbol, action="declined",
                                  regime=cand.regime.as_log(),
@@ -214,6 +221,10 @@ def main(argv=None) -> int:
             continue
 
         qty = spreads.size_for_risk(cand.spread, verdict.risk_budget)
+        if args.max_contracts is not None:
+            # A cap can only ever shrink the position: the risk budget stays
+            # authoritative, this just refuses to use all of it.
+            qty = min(qty, args.max_contracts)
         if qty < 1:
             journal.log_decision(
                 symbol=cand.regime.symbol, action="declined",
@@ -224,14 +235,16 @@ def main(argv=None) -> int:
 
         sized = spreads.Vertical(cand.spread.kind, cand.spread.long_leg,
                                  cand.spread.short_leg, qty=qty)
-        limit = sized.limit_price()
+        limit = sized.limit_price(args.aggression)
         legs = sized.legs_payload()
         command = cli.as_argv("order", "submit", "--order-class", "mleg",
                               "--type", "limit", "--qty", str(qty),
                               "--limit-price", f"{limit:.2f}",
                               "--time-in-force", "day", "--legs", "<legs.json>")
 
-        logger.info("%s → %s", cand.regime.symbol, sized.describe())
+        logger.info("%s → %s | mid %.2f natural %.2f limit %.2f",
+                    cand.regime.symbol, sized.describe(),
+                    abs(sized.net_mid), sized.natural_price, limit)
 
         if dry_run:
             journal.log_decision(symbol=cand.regime.symbol, action="declined",
