@@ -103,6 +103,16 @@ class Regime:
     bias: str
     stance: str
     reason: str
+    #: The same window with its single largest return removed, and the ratio
+    #: that follows from it. Both are recorded whether or not they changed the
+    #: decision — a reading that survived the robustness check is worth as much
+    #: in the record as one that failed it.
+    realized_vol_ex_jump: float | None = None
+    ratio_ex_jump: float | None = None
+    #: Fraction of the realized-vol reading carried by its largest single day.
+    jump_ratio: float | None = None
+    #: True when the two readings disagreed about what to do.
+    jump_blocked: bool = False
 
     def as_log(self) -> dict:
         return {
@@ -110,6 +120,10 @@ class Regime:
             "implied_vol": self.implied_vol,
             "realized_vol": self.realized_vol,
             "iv_rv_ratio": self.ratio,
+            "realized_vol_ex_jump": self.realized_vol_ex_jump,
+            "iv_rv_ratio_ex_jump": self.ratio_ex_jump,
+            "jump_ratio": self.jump_ratio,
+            "jump_blocked": self.jump_blocked,
             "trend_bias": self.bias,
             "stance": self.stance,
             "reason": self.reason,
@@ -141,30 +155,88 @@ class Candidate:
     spread: Vertical
     rationale: str
     notes: list[str] = field(default_factory=list)
+    #: Result of the earnings-calendar lookup, attached by the runner once the
+    #: expiry is known. `agent.earnings.EventCheck | None`, kept untyped here so
+    #: the strategy module does not depend on the calendar to be importable.
+    event: object | None = None
+
+
+def _stance_for(ratio: float | None, rich_ratio: float, cheap_ratio: float) -> str:
+    if ratio is None:
+        return STAND_ASIDE
+    if ratio >= rich_ratio:
+        return SELL_PREMIUM
+    if ratio <= cheap_ratio:
+        return BUY_PREMIUM
+    return STAND_ASIDE
 
 
 def classify(symbol: str, *, implied: float | None, realized: float | None,
              closes: list[float],
              rich_ratio: float = RICH_RATIO,
-             cheap_ratio: float = CHEAP_RATIO) -> Regime:
-    """Map the IV/RV reading onto a stance. Missing data means stand aside."""
+             cheap_ratio: float = CHEAP_RATIO,
+             window: int = 20) -> Regime:
+    """Map the IV/RV reading onto a stance. Missing data means stand aside.
+
+    The reading is taken twice. Close-to-close realized volatility cannot tell
+    a jump apart from volatility, so a single earnings gap inside the trailing
+    window inflates the denominator and the ratio reads low — options look
+    cheap when what actually happened is that the yardstick broke. That is not
+    hypothetical: it is exactly how NVDA came back at IV/RV 0.63 on 2026-08-31
+    off a 45% realized reading, and the agent bought a debit spread on it.
+
+    So the same window is measured again with its single largest return
+    removed, and **a stance has to survive both readings**. If dropping one day
+    moves the symbol into a different bucket, the signal was that one day, and
+    the agent stands aside. The check is symmetric by construction: it can only
+    ever remove a trade, never create one.
+    """
     ratio = vol.variance_premium(implied, realized)
     bias = vol.trend_bias(closes)
+    jump = vol.jump_ratio(closes, window=window)
+
+    # The ex-jump reading is derived by *scaling* the realized vol the caller
+    # supplied, not by recomputing an absolute one from the closes. They are
+    # usually the same number, but only usually — the caller owns the choice of
+    # estimator and window, and an independently computed second figure would
+    # silently compare two different measurements whenever they diverged. What
+    # is wanted here is one quantity: how far this reading falls when its
+    # largest day is dropped.
+    realized_ex_jump = (realized * (1 - jump)
+                        if realized is not None and jump is not None else None)
+    ratio_ex_jump = vol.variance_premium(implied, realized_ex_jump)
+
+    stance = _stance_for(ratio, rich_ratio, cheap_ratio)
+    jump_blocked = False
 
     if ratio is None:
-        stance, reason = STAND_ASIDE, "no IV/RV reading (missing chain greeks or bars)"
-    elif ratio >= rich_ratio:
-        stance = SELL_PREMIUM
+        reason = "no IV/RV reading (missing chain greeks or bars)"
+    elif stance == SELL_PREMIUM:
         reason = f"IV/RV {ratio:.2f} >= {rich_ratio:.2f} — premium is rich"
-    elif ratio <= cheap_ratio:
-        stance = BUY_PREMIUM
+    elif stance == BUY_PREMIUM:
         reason = f"IV/RV {ratio:.2f} <= {cheap_ratio:.2f} — premium is cheap"
     else:
-        stance = STAND_ASIDE
         reason = f"IV/RV {ratio:.2f} inside [{cheap_ratio:.2f}, {rich_ratio:.2f}] — no edge claimed"
 
+    if stance != STAND_ASIDE and ratio_ex_jump is not None:
+        robust = _stance_for(ratio_ex_jump, rich_ratio, cheap_ratio)
+        if robust != stance:
+            jump_blocked = True
+            stance = STAND_ASIDE
+            reason = (
+                f"IV/RV {ratio:.2f} does not survive dropping the largest day "
+                f"({ratio_ex_jump:.2f} ex-jump, {jump:.0%} of realized vol was "
+                f"one session) — the reading is the event, not the surface"
+                if jump is not None else
+                f"IV/RV {ratio:.2f} does not survive dropping the largest day "
+                f"({ratio_ex_jump:.2f} ex-jump)"
+            )
+
     return Regime(symbol=symbol, implied_vol=implied, realized_vol=realized,
-                  ratio=ratio, bias=bias, stance=stance, reason=reason)
+                  ratio=ratio, bias=bias, stance=stance, reason=reason,
+                  realized_vol_ex_jump=realized_ex_jump,
+                  ratio_ex_jump=ratio_ex_jump, jump_ratio=jump,
+                  jump_blocked=jump_blocked)
 
 
 def spread_kind_for(stance: str, bias: str) -> str | None:

@@ -284,3 +284,65 @@ class TestSizing:
         spread must not compound the quantity."""
         sized = Vertical(spread.kind, spread.long_leg, spread.short_leg, qty=5)
         assert size_for_risk(sized, 500) == 2
+
+
+class TestSizingAtTheSubmittedPrice:
+    """The gap between the price a spread was sized at and the price it was
+    sent at.
+
+    `max_loss` prices the package at the midpoint. The order goes out at
+    `limit_price(aggression)`, which is always worse — a debit pays more than
+    mid, a credit collects less. Sizing on one and submitting at the other
+    spends the concession out of a budget no gate approved.
+    """
+
+    @pytest.fixture
+    def nvda(self):
+        """The live 2026-08-31 position: 2.5-wide calls, mid 1.25, natural 1.40."""
+        return build(BULL_CALL_DEBIT,
+                     [contract(220.0, "call", bid=8.00, ask=8.20),
+                      contract(222.5, "call", bid=6.80, ask=6.90)])
+
+    def test_the_shipped_breach_is_reproduced(self, nvda):
+        """16 x 1.31 x 100 = $2,096 against a $2,000 cap — 2.10% of equity."""
+        assert size_for_risk(nvda, 2000.0) == 16
+        assert nvda.max_loss_at(1.31) * 16 == pytest.approx(2096.0)
+
+    def test_sizing_at_the_limit_fits_the_budget(self, nvda):
+        limit = nvda.limit_price(0.5)
+        qty = size_for_risk(nvda, 2000.0, net_price=limit)
+        assert qty == 15
+        assert Vertical(nvda.kind, nvda.long_leg, nvda.short_leg,
+                        qty=qty).max_loss_at(limit) <= 2000.0
+
+    def test_a_worse_price_never_increases_the_size(self, nvda):
+        sizes = [size_for_risk(nvda, 2000.0, net_price=nvda.limit_price(a))
+                 for a in (0.0, 0.25, 0.5, 0.75, 1.0)]
+        assert sizes == sorted(sizes, reverse=True)
+
+    def test_a_credit_spread_risks_the_width_less_what_it_actually_collects(self):
+        """Conceding on a credit means collecting less, which is more risk —
+        the same error with the sign flipped."""
+        spread = build(BULL_PUT_CREDIT, [put(300.0, 1.20), put(302.5, 1.65)])
+        assert spread.max_loss_at(0.45) == pytest.approx((2.5 - 0.45) * MULTIPLIER)
+        assert spread.max_loss_at(0.39) > spread.max_loss_at(0.45)
+
+    def test_max_loss_and_max_gain_still_sum_to_the_width_at_any_price(self):
+        """The invariant that catches a sign error in any single formula, now
+        checked against a traded price rather than the midpoint."""
+        for spread in (build(BULL_CALL_DEBIT, [call(100, 5.00), call(105, 3.00)]),
+                       build(BEAR_PUT_DEBIT, [put(105, 5.00), put(100, 3.00)]),
+                       build(BULL_PUT_CREDIT, [put(100, 3.00), put(105, 5.00)]),
+                       build(BEAR_CALL_CREDIT, [call(100, 5.00), call(105, 3.00)])):
+            for price in (0.25, 1.00, 2.00):
+                total = spread.max_loss_at(price) + spread.max_gain_at(price)
+                assert total == pytest.approx(spread.width * MULTIPLIER)
+
+    def test_paying_the_full_width_leaves_no_upside(self, nvda):
+        assert nvda.max_gain_at(nvda.width) == 0.0
+        assert nvda.max_loss_at(nvda.width) == pytest.approx(nvda.width * MULTIPLIER)
+
+    def test_the_midpoint_sizing_path_still_works_for_pure_arithmetic(self, nvda):
+        # net_price stays optional so the arithmetic can be tested without a
+        # pricing decision — but the runner always passes it.
+        assert size_for_risk(nvda, 2000.0) == 16

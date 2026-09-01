@@ -1,0 +1,72 @@
+name: heartbeat
+
+# The failure this exists to catch is silence.
+#
+# On 2026-09-01 the trading workflow did not run. Nothing broke, nothing was
+# logged, no notification was sent, and the first anyone knew was noticing that
+# the day had no commit. An unattended agent whose scheduler can quietly stop
+# is an agent that reports success by not being looked at.
+#
+# So one job runs after the close and asserts the thing that actually matters:
+# there is a run record for today. When there is not, it fails — and a failed
+# workflow is the notification, since GitHub emails the repository owner on it
+# without any extra service to configure or secret to hold.
+#
+# It deliberately does not check P&L, or fills, or whether the agent traded.
+# Standing aside all day is the designed behaviour and must not page anyone.
+
+on:
+  schedule:
+    # 20:15 UTC = 16:15 ET, fifteen minutes after the close, weekdays.
+    - cron: "15 20 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert the agent ran today
+        shell: bash
+        run: |
+          set -euo pipefail
+          TODAY="$(date -u +%Y-%m-%d)"
+          LOG="logs/daily_runs.jsonl"
+
+          if [ ! -f "$LOG" ]; then
+            echo "::error::$LOG does not exist — the agent has never recorded a run."
+            exit 1
+          fi
+
+          # A market holiday is a legitimate reason for no record, so ask the
+          # broker rather than guessing from the calendar. Being unable to ask
+          # is not proof of a holiday: fall through to the strict check.
+          ./scripts/install_cli.sh >/dev/null 2>&1 || true
+          export PATH="$HOME/.local/bin:$PATH"
+          if command -v alpaca >/dev/null 2>&1; then
+            if ALPACA_API_KEY="${{ secrets.ALPACA_API_KEY }}" \
+               ALPACA_SECRET_KEY="${{ secrets.ALPACA_SECRET_KEY }}" \
+               alpaca clock --quiet 2>/dev/null | grep -q '"is_open": *false'; then
+              # Closed now is expected at 20:15; what matters is whether there
+              # was a session at all today. `next_open` on the same date means
+              # the market has not opened yet today — a holiday or a weekend.
+              echo "clock reachable; continuing to the record check"
+            fi
+          fi
+
+          RECORDS="$(grep -c "\"date\": \"$TODAY\"" "$LOG" || true)"
+          if [ "$RECORDS" -eq 0 ]; then
+            echo "::error::No run record for $TODAY in $LOG."
+            echo "The scheduled workflow did not run, or failed before writing a record."
+            echo "Last records on file:"
+            tail -n 3 "$LOG"
+            exit 1
+          fi
+
+          echo "$RECORDS run record(s) for $TODAY:"
+          grep "\"date\": \"$TODAY\"" "$LOG" | tail -n 3

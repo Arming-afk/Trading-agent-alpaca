@@ -93,3 +93,66 @@ def trend_bias(closes: list[float], window: int = 20) -> str:
     if spot < sma:
         return "bearish"
     return "neutral"
+
+
+# ── jump contamination ───────────────────────────────────────────────────────
+# Why this exists, concretely. On 2026-08-31 the agent read NVDA at IV/RV 0.63
+# and bought a debit spread on the claim that options were cheap. They were not.
+# Realized vol was 45% because the trailing 20-day window contained a single
+# earnings gap, while implied had already been crushed the day after that same
+# event. The ratio was low because the *denominator* was contaminated, not
+# because the surface was dislocated.
+#
+# A close-to-close estimator cannot tell a jump apart from volatility — that is
+# the known weakness of the estimator, not a surprise. So rather than trusting
+# one number, the agent computes the same window twice: once as-is, and once
+# with the single largest absolute return removed. If one event is carrying the
+# reading, the two disagree, and a signal that only survives on the contaminated
+# reading is not traded.
+
+#: A window is called jump-contaminated when removing its single largest
+#: absolute return moves the volatility estimate by more than this fraction.
+JUMP_TOLERANCE = 0.20
+
+
+def _annualised(sample: list[float]) -> float | None:
+    if len(sample) < 2:
+        return None
+    mean = sum(sample) / len(sample)
+    variance = sum((r - mean) ** 2 for r in sample) / (len(sample) - 1)
+    return math.sqrt(variance) * math.sqrt(ANNUALISATION)
+
+
+def realized_vol_ex_jump(closes: list[float], window: int = 20) -> float | None:
+    """Annualised close-to-close vol with the single largest absolute return
+    dropped from the window.
+
+    This is not a better estimate of volatility — it is deliberately biased
+    low. Its only job is to be compared against the ordinary estimate, so that
+    a window whose reading rests on one day can be identified as such.
+    """
+    returns = daily_returns(closes)
+    if len(returns) < window or window < 3:
+        return None
+    sample = list(returns[-window:])
+    sample.remove(max(sample, key=abs))
+    return _annualised(sample)
+
+
+def jump_ratio(closes: list[float], window: int = 20) -> float | None:
+    """How much of the realized-vol reading rests on its single largest day,
+    as a fraction. 0.0 means removing that day changes nothing; 0.45 means the
+    estimate falls by 45% without it.
+    """
+    full = realized_vol(closes, window=window)
+    trimmed = realized_vol_ex_jump(closes, window=window)
+    if full is None or trimmed is None or full <= 0:
+        return None
+    return max((full - trimmed) / full, 0.0)
+
+
+def is_jump_contaminated(closes: list[float], window: int = 20,
+                         tolerance: float = JUMP_TOLERANCE) -> bool:
+    """True when one day is carrying the realized-vol reading."""
+    ratio = jump_ratio(closes, window=window)
+    return ratio is not None and ratio > tolerance

@@ -1,0 +1,17 @@
+{
+  "_comment": [
+    "Curated earnings dates per symbol, YYYY-MM-DD, confirmed dates only.",
+    "This file ships EMPTY on purpose. There is no earnings endpoint in the",
+    "Alpaca CLI, and guessed dates would silently authorise trades on numbers",
+    "nobody checked. A symbol absent from `events` is reported as UNKNOWN by",
+    "agent/earnings.py — never as clear — and the decision log records which.",
+    "",
+    "To populate: add confirmed dates from the issuer's investor-relations",
+    "page or your data vendor, then commit the file. Dates in the past are",
+    "harmless; the lookup only considers dates on or after today.",
+    "",
+    "Example:  \"NVDA\": [\"2026-11-18\"],"
+  ],
+  "updated": null,
+  "events": {}
+}

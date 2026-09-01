@@ -121,3 +121,37 @@ def spread_snapshot(spread: Any) -> dict:
         "reward_risk": round(spread.reward_risk, 4),
         "worst_leg_spread_pct": round(spread.worst_spread_pct, 2),
     }
+
+
+#: Run records that count as "the agent already did its full pass today".
+COMPLETED_STATUSES = ("traded", "dry_run", "no_trades")
+
+
+def runs_today(today: str) -> list[dict]:
+    """Every run record written on `today` (a YYYY-MM-DD string)."""
+    return [row for row in read(config.RUNS_LOG)
+            if str(row.get("date") or "") == today]
+
+
+def completed_full_run_today(today: str) -> bool:
+    """Whether a full survey has already run today.
+
+    This is what makes a frequent schedule safe. GitHub's cron is best-effort —
+    on 2026-08-31 the 14:00 UTC trigger arrived at 19:43, seventeen minutes
+    before the close, and on 2026-09-01 it did not arrive at all. The fix is to
+    schedule many attempts and let the first one that lands do the work, which
+    only holds together if the later ones can tell that it did.
+
+    Note what this does *not* gate: managing open positions and chasing unfilled
+    orders still run on every pass. Those are the jobs that benefit from being
+    done twelve times a day.
+    """
+    return any(str(row.get("status") or "") in COMPLETED_STATUSES
+               and row.get("mode", "full") == "full"
+               for row in runs_today(today))
+
+
+def last_run(today: str | None = None) -> dict | None:
+    """The most recent run record, optionally restricted to one date."""
+    rows = runs_today(today) if today else read(config.RUNS_LOG)
+    return rows[-1] if rows else None

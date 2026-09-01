@@ -20,7 +20,9 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import chain as ch
-from agent import config, journal, strategy
+from agent import config, journal, outcomes as outcomes_mod
+from agent import positions as pos_mod
+from agent import strategy
 from dashboard import theme
 
 st.set_page_config(page_title="Options Alpha Agent", page_icon="📈",
@@ -173,15 +175,28 @@ if live:
     equity = float(account.get("equity") or 0)
     last = float(account.get("last_equity") or equity)
     positions = live["positions"]
-    open_risk = sum(abs(float(p.get("cost_basis") or 0)) for p in positions)
+    # Capital at risk is the sum of each spread's recorded worst case, not the
+    # sum of the legs' cost bases. For a credit spread the two are unrelated:
+    # the cost basis is the credit collected, the risk is the width less that
+    # credit. See agent/positions.py.
+    open_spreads, unexplained = pos_mod.reconcile(positions, decisions)
+    open_risk = pos_mod.open_risk(open_spreads)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Equity", f"${equity:,.2f}", f"{equity - last:+,.2f} today")
     c2.metric("Total return", f"{(equity / 100_000 - 1):+.2%}",
               help="against the $100,000 starting balance")
-    c3.metric("Open legs", len(positions))
+    c3.metric("Open spreads", len(open_spreads),
+              f"{len(positions)} legs" if positions else None)
     c4.metric("Capital at risk", f"${open_risk:,.0f}",
               f"{open_risk / equity:.1%} of equity" if equity else None)
+
+    if unexplained:
+        st.warning(
+            f"{len(unexplained)} position(s) the journal cannot explain — "
+            "a partial fill or a manual action. They are counted at their own "
+            "worst case in capital at risk and are never closed automatically: "
+            + ", ".join(u.describe() for u in unexplained))
 
     market = "open" if live["clock"].get("is_open") else "closed"
     st.caption(f"Account `{account.get('account_number','—')}` · market {market}")
@@ -261,3 +276,53 @@ if live and live["positions"]:
                    "Return": "{:+.2%}"}),
         use_container_width=True, hide_index=True,
     )
+
+
+# ── what came of it ──────────────────────────────────────────────────────────
+# The decision table above says why the agent acted. This says whether it was
+# right, and it is the panel the project was missing: every entry recorded its
+# IV/RV and nothing ever came back to compute the result.
+st.divider()
+st.subheader("Outcomes")
+st.caption(
+    "Every submitted spread, joined back to the volatility reading that caused "
+    "it. Orders that never filled are shown as such rather than counted as "
+    "break-even trades — two of the first three were."
+)
+
+trade_rows = outcomes_mod.build(
+    decisions,
+    live["positions"] if live else [],
+    {},
+)
+
+if not trade_rows:
+    st.info("No positions have been submitted yet.")
+else:
+    summary = outcomes_mod.summarise(trade_rows)
+    o1, o2, o3 = st.columns(3)
+    o1.metric("Submitted", summary["trades_submitted"])
+    o2.metric("Filled", summary["filled"],
+              f"{summary['fill_rate']:.0%} fill rate"
+              if summary["fill_rate"] is not None else None)
+    o3.metric("P&L on filled", f"${summary['total_pl']:,.2f}")
+
+    st.dataframe(
+        pd.DataFrame([{
+            "Symbol": o.symbol,
+            "Structure": o.kind,
+            "IV/RV at entry": o.ratio,
+            "At risk": o.max_loss,
+            "P&L": o.pl if o.resolved else None,
+            "On risk": o.pl_vs_risk,
+            "Status": o.status,
+        } for o in trade_rows]).style.format({
+            "IV/RV at entry": "{:.2f}", "At risk": "${:,.0f}",
+            "P&L": "${:+,.0f}", "On risk": "{:+.1%}",
+        }, na_rep="—"),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown("**The falsification test**")
+    st.write(summary["verdict"])
+

@@ -77,6 +77,32 @@ class Vertical:
             per_share = max(-self.net_mid, 0.0)
         return per_share * MULTIPLIER * self.qty
 
+    def max_loss_at(self, net_price: float) -> float:
+        """Worst case if the package actually trades at `net_price` — the
+        absolute per-share price sent as `--limit-price`.
+
+        `max_loss` above prices the position at the midpoint, which is not the
+        price the order is sent at. The limit is walked toward the marketable
+        side by `limit_price(aggression)`, and that concession is always in the
+        direction of more risk: a debit pays more than mid, a credit collects
+        less than mid. Sizing on `max_loss` and submitting at `limit_price`
+        therefore breaches the per-trade budget by exactly the concession.
+
+        It is not a rounding error. On 2026-08-31 NVDA was sized at 16
+        contracts against a $1.25 mid — $2,000, the 2% budget to the dollar —
+        and submitted at $1.31, which is $2,096, or 2.10% of equity. The gate
+        was arithmetic on a number the order was never going to trade at.
+        """
+        price = abs(net_price)
+        per_share = price if self.is_debit else max(self.width - price, 0.0)
+        return max(per_share, 0.0) * MULTIPLIER * self.qty
+
+    def max_gain_at(self, net_price: float) -> float:
+        """Best case at an actual traded price, for the same reason."""
+        price = abs(net_price)
+        per_share = max(self.width - price, 0.0) if self.is_debit else price
+        return max(per_share, 0.0) * MULTIPLIER * self.qty
+
     @property
     def breakeven(self) -> float:
         """Underlying price at expiry where the position breaks even."""
@@ -183,14 +209,22 @@ def build(kind: str, legs: list[Contract], qty: int = 1) -> Vertical:
     return Vertical(kind=kind, long_leg=long_leg, short_leg=short_leg, qty=qty)
 
 
-def size_for_risk(spread: Vertical, risk_budget: float) -> int:
+def size_for_risk(spread: Vertical, risk_budget: float,
+                  *, net_price: float | None = None) -> int:
     """Largest whole-contract quantity whose max loss fits `risk_budget`.
+
+    `net_price` is the price the order will actually be sent at. Pass it. The
+    midpoint is a quote, not a price the package trades at, and sizing against
+    it lets the aggression concession spend budget the gate never granted —
+    see `Vertical.max_loss_at`. It stays optional only so that the pure
+    arithmetic can be tested without a pricing decision.
 
     Returns 0 when even one contract is too large — the caller must treat that
     as "no trade", never as "round up to one".
     """
     unit = Vertical(kind=spread.kind, long_leg=spread.long_leg,
                     short_leg=spread.short_leg, qty=1)
-    if unit.max_loss <= 0 or risk_budget <= 0:
+    unit_loss = unit.max_loss if net_price is None else unit.max_loss_at(net_price)
+    if unit_loss <= 0 or risk_budget <= 0:
         return 0
-    return int(risk_budget // unit.max_loss)
+    return int(risk_budget // unit_loss)

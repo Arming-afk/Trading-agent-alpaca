@@ -65,5 +65,16 @@ MAX_DTE = _int("MAX_DTE", 45)
 MAX_SPREAD_PCT = _num("MAX_SPREAD_PCT", 10.0)
 MIN_OPEN_INTEREST = _int("MIN_OPEN_INTEREST", 100)
 
-# ── LLM ──────────────────────────────────────────────────────────────────────
-FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY", "")
+# ── LLM advisor ──────────────────────────────────────────────────────────────
+# The advisor is a veto, never a source of trades. See agent/advisor.py for why
+# the authority runs in that direction and only that direction. It is off by
+# default: an agent whose behaviour depends on whether an API key happened to
+# be present is not reproducible.
+LLM_ENABLED = _flag("LLM_ENABLED", False)
+LLM_API_KEY = os.getenv("FIREWORKS_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.fireworks.ai/inference/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "accounts/fireworks/models/llama-v3p1-70b-instruct")
+LLM_TIMEOUT = _int("LLM_TIMEOUT", 20)
+
+# Kept for backward compatibility with .env files written before the rename.
+FIREWORKS_API_KEY = LLM_API_KEY

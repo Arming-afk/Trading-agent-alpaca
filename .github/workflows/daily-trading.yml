@@ -1,22 +1,44 @@
 name: daily trading run
 
+# Why twelve triggers instead of one.
+#
+# GitHub's scheduled workflows are best-effort and the delay is unbounded. The
+# single 14:00 UTC cron this workflow started with fired once at 19:43 — 17
+# minutes before the close, which is why two of that day's three orders never
+# filled — and on the following session it did not fire at all. A schedule that
+# is allowed to silently not happen is not a schedule.
+#
+# So the run is attempted every half hour through the session and made
+# idempotent instead: the first pass that lands does the full survey, and the
+# rest run in maintenance mode, managing open positions and chasing unfilled
+# orders without opening anything new. `agent/journal.completed_full_run_today`
+# is what tells them apart. `.github/workflows/heartbeat.yml` fails loudly if a
+# session ends with no run record at all.
+
 on:
   schedule:
-    # 14:00 UTC = 10:00 ET — half an hour after the open, so opening auctions
-    # have settled and option quotes are real rather than overnight stubs.
-    - cron: "0 14 * * 1-5"
+    # Every 30 minutes, 14:00–19:30 UTC (10:00–15:30 ET), Monday to Friday.
+    # Starts half an hour after the open so the opening auction has settled,
+    # and stops half an hour before the close so a chase has room to finish.
+    - cron: "0,30 14-19 * * 1-5"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Decide and log, submit nothing"
+      live:
+        description: "Submit real orders (leave off for a dry run)"
         type: boolean
-        default: true
+        default: false
       force:
         description: "Run even when the market is closed (selection only)"
         type: boolean
         default: false
+      mode:
+        description: "auto | full | maintenance"
+        type: choice
+        options: [auto, full, maintenance]
+        default: auto
 
-# Never let two runs trade at once, and never cancel one that is mid-submission.
+# Never let two runs trade at once, and never cancel one that is mid-submission
+# or mid-chase.
 concurrency:
   group: daily-trading
   cancel-in-progress: false
@@ -27,7 +49,8 @@ permissions:
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Long enough for a full survey plus three chase rounds at 60s each.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -56,15 +79,31 @@ jobs:
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          # Scheduled runs trade. A manual dispatch defaults to dry-run so the
-          # workflow can be smoke-tested without touching the account.
-          TRADING_ENABLED: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          # Scheduled runs trade. A manual dispatch trades only when it was
+          # asked to — the default stays a dry run, so the workflow can be
+          # smoke-tested without touching the account.
+          TRADING_ENABLED: ${{ (github.event_name == 'schedule' || inputs.live) && '1' || '0' }}
+          # The advisor can only veto an already-approved trade, and fails open
+          # when the key is absent, so a missing secret costs nothing.
+          LLM_ENABLED: ${{ vars.LLM_ENABLED || '0' }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
         run: |
           python scripts/daily_run.py \
-            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            --mode "${{ inputs.mode || 'auto' }}" \
             ${{ inputs.force && '--force' || '' }}
 
+      - name: Recompute trade outcomes
+        # Derived from the journal and the broker, regenerated in full every
+        # run so it can never disagree with the decision log.
+        if: always()
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: python scripts/outcomes.py || python scripts/outcomes.py --offline
+
       - name: Commit the day's records
+        if: always()
         run: |
           git config user.name  "trading-bot"
           git config user.email "trading-bot@users.noreply.github.com"
@@ -73,13 +112,13 @@ jobs:
             echo "no new records"
             exit 0
           fi
-          git commit -m "chore(logs): run $(date -u +%Y-%m-%d) [bot]"
-          # Rebase before pushing: a manual dispatch and the cron can land close
-          # together, and losing a day's record to a rejected push is worse than
-          # a retry.
-          for i in 1 2 3; do
+          git commit -m "chore(logs): run $(date -u +%Y-%m-%dT%H:%MZ) [bot]"
+          # Rebase before pushing: with a run every half hour, two jobs landing
+          # close together is the normal case rather than the exception, and
+          # losing a record to a rejected push is worse than a retry.
+          for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main && git push origin main && exit 0
             sleep $((i * 5))
           done
-          echo "could not push records after 3 attempts" >&2
+          echo "could not push records after 5 attempts" >&2
           exit 1
