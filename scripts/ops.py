@@ -3,6 +3,7 @@
 
     python3 scripts/ops.py report              # what is on, and what is working
     python3 scripts/ops.py cancel-open-orders  # flatten the order book
+    python3 scripts/ops.py trim                # cut positions back to approved size
 
 This exists because of a specific incident. On 2026-09-01 the fill chase
 cancelled six orders through `alpaca order cancel <id>`, which the CLI rejects
@@ -21,11 +22,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import cli, config, journal
+from agent import cli, config, execution, journal
 from agent import positions as pos_mod
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -62,6 +64,14 @@ def describe(order: dict) -> str:
             f"{order.get('status'):<16} {symbols}")
 
 
+#: Concessions to walk through when trimming, as a percentage of the mark.
+#: Getting out of a position that should not exist is worth more than the last
+#: few cents of it, so this starts where a normal close ends.
+TRIM_CONCESSIONS = (6.0, 12.0, 25.0)
+#: Seconds to leave each trim order resting before improving it.
+TRIM_WAIT = 45
+
+
 def cmd_report() -> int:
     account = cli.account()
     equity = float(account.get("equity") or 0)
@@ -84,12 +94,118 @@ def cmd_report() -> int:
         for item in unexplained:
             print(f"      {item.describe()}")
 
+    oversize = [s for s in spreads if s.excess_qty > 0]
+    if oversize:
+        print()
+        print("  ! positions larger than the risk gate approved:")
+        for item in oversize:
+            print(f"      {item.underlying} {item.kind}: {item.qty} on, "
+                  f"{item.approved_qty} approved, {item.excess_qty} excess "
+                  f"(${item.max_loss:,.0f} at risk, "
+                  f"{item.max_loss / equity:.1%} of equity)" if equity else "")
+        print("    run `ops.py trim` to cut them back")
+
     live = working_orders()
     print()
     print(f"  {len(live)} working order(s)")
     for order in live:
         print(f"    {describe(order)}")
     print()
+    return 0
+
+
+def _oversize() -> list:
+    legs = cli.positions()
+    spreads, _ = pos_mod.reconcile(legs, journal.read(config.DECISIONS_LOG))
+    return [s for s in spreads if s.excess_qty > 0]
+
+
+def _trim_one(spread, *, dry_run: bool) -> bool:
+    """Close `spread.excess_qty` contracts and leave the approved size on.
+
+    Trimming rather than flattening is the whole point. The approved position
+    is a decision the gates made and there is no reason to unwind it; what has
+    to go is the part no gate ever sized. So the closing order carries the
+    excess quantity, not the whole position.
+    """
+    excess = spread.excess_qty
+    legs = spread.closing_legs()
+    print(f"  {spread.underlying} {spread.kind}: {spread.qty} on, "
+          f"{spread.approved_qty} approved -> closing {excess}")
+
+    if len(legs) < 2:
+        print("    ! not a closable package; skipping", file=sys.stderr)
+        return False
+    if dry_run:
+        print("    --dry-run: nothing submitted")
+        return True
+
+    order_id = None
+    for attempt, concession in enumerate(TRIM_CONCESSIONS, start=1):
+        if order_id is not None and not execution._cancel(order_id):
+            print("    ! could not cancel the resting order — stopping rather "
+                  "than stacking a second one", file=sys.stderr)
+            return False
+
+        limit = execution.close_price(spread, concession_pct=concession)
+        if limit is None:
+            print("    ! no mark on a leg; cannot price the exit", file=sys.stderr)
+            return False
+
+        try:
+            order = cli.submit_mleg(legs, qty=excess, limit_price=limit)
+        except cli.AlpacaCLIError as exc:
+            print(f"    ! rejected: {exc}", file=sys.stderr)
+            return False
+
+        order_id = str(order.get("id") or "")
+        print(f"    attempt {attempt}: {excess} @ {limit:.2f} ({concession:.0f}% "
+              f"concession) order {order_id}")
+        time.sleep(TRIM_WAIT)
+
+        status, filled = execution.poll(order_id)
+        if status == "filled" or filled >= excess:
+            print(f"    filled {filled} at {limit:.2f}")
+            journal.log_decision(
+                symbol=spread.underlying, action="closed", regime={},
+                spread=spread.as_log(), order=order,
+                reason=f"trimmed {excess} contract(s) back to the approved "
+                       f"{spread.approved_qty} after an execution incident",
+                command=cli.as_argv("order", "submit", "--order-class", "mleg",
+                                    "--type", "limit", "--qty", str(excess),
+                                    "--limit-price", f"{limit:.2f}",
+                                    "--time-in-force", "day", "--legs", "<legs.json>"))
+            return True
+        print(f"    not filled ({status}); improving")
+
+    print("    ! still not filled after every concession — order left resting",
+          file=sys.stderr)
+    return False
+
+
+def cmd_trim(dry_run: bool) -> int:
+    oversize = _oversize()
+    if not oversize:
+        print("  every position is within its approved size")
+        return 0
+
+    print(f"  {len(oversize)} oversized position(s)")
+    print()
+    for spread in oversize:
+        _trim_one(spread, dry_run=dry_run)
+        print()
+
+    if dry_run:
+        return 0
+
+    remaining = _oversize()
+    if remaining:
+        print("  ! still oversized:", file=sys.stderr)
+        for spread in remaining:
+            print(f"      {spread.underlying}: {spread.qty} on, "
+                  f"{spread.approved_qty} approved", file=sys.stderr)
+        return 1
+    print("  every position is now within its approved size")
     return 0
 
 
@@ -137,13 +253,16 @@ def cmd_cancel_open_orders(dry_run: bool) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["report", "cancel-open-orders"])
+    parser.add_argument("command",
+                        choices=["report", "cancel-open-orders", "trim"])
     parser.add_argument("--dry-run", action="store_true",
                         help="list what would be cancelled and stop")
     args = parser.parse_args(argv)
 
     if args.command == "report":
         return cmd_report()
+    if args.command == "trim":
+        return cmd_trim(args.dry_run)
     return cmd_cancel_open_orders(args.dry_run)
 
 

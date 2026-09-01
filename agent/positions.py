@@ -61,6 +61,7 @@ class OpenSpread:
     expiration: date | None
     long_symbol: str | None
     short_symbol: str | None
+    #: Contracts actually on at the broker.
     qty: int
     #: Worst case in dollars, as computed and logged at entry.
     max_loss: float
@@ -69,6 +70,25 @@ class OpenSpread:
     legs: list[dict] = field(default_factory=list)
     state: str = MATCHED
     entry: dict | None = None
+    #: Contracts the risk gate approved, as recorded in the journal at entry.
+    #: Normally equal to `qty`; a difference means the account is carrying a
+    #: position no gate ever sized.
+    approved_qty: int = 0
+
+    @property
+    def excess_qty(self) -> int:
+        """Contracts on beyond what was approved.
+
+        This is not a theoretical field. On 2026-09-01 a failed cancel let the
+        fill chase submit three orders for one intent, all three filled, and
+        the account carried six SPY spreads against an approved two and twelve
+        AAPL against four — 4.0% and 5.0% of equity each, against a 2% per-trade
+        cap. The broker reports a position; only the journal knows how large it
+        was supposed to be, so only the join can see the breach at all.
+        """
+        if self.state != MATCHED or self.approved_qty <= 0:
+            return 0
+        return max(self.qty - self.approved_qty, 0)
 
     @property
     def symbols(self) -> list[str]:
@@ -125,6 +145,8 @@ class OpenSpread:
             "long_leg": self.long_symbol,
             "short_leg": self.short_symbol,
             "qty": self.qty,
+            "approved_qty": self.approved_qty,
+            "excess_qty": self.excess_qty,
             "state": self.state,
             "max_loss": round(self.max_loss, 2),
             "max_gain": round(self.max_gain, 2),
@@ -225,6 +247,7 @@ def reconcile(positions: list[dict], decisions: list[dict] | None = None
             legs=legs,
             state=MATCHED if len(legs) == 2 else PARTIAL,
             entry=record,
+            approved_qty=logged_qty,
         )
         spreads.append(spread)
         if spread.state == PARTIAL:

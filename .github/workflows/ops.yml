@@ -13,6 +13,7 @@ on:
         options:
           - report
           - cancel-open-orders
+          - trim
         default: report
       dry_run:
         description: "List what would change and stop"

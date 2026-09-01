@@ -175,3 +175,50 @@ class TestClosingLegs:
         decisions = [opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT)]
         spread = pos_mod.reconcile(legs, decisions)[0][0]
         assert spread.dte(TODAY) == 16
+
+
+class TestExcessSize:
+    """Detecting a position the risk gate never approved.
+
+    On 2026-09-01 a failed cancel let the fill chase submit three orders for
+    one intent, all three filled, and the account carried six SPY spreads
+    against an approved two. The broker reports a position and nothing else;
+    only the journal knows how large it was supposed to be, so only the join
+    can see the breach.
+    """
+
+    def _spread(self, on: int, approved: int):
+        legs = [leg(CREDIT_LONG, on), leg(CREDIT_SHORT, -on)]
+        decisions = [opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                            qty=approved, max_loss=1660.0, max_gain=340.0)]
+        return pos_mod.reconcile(legs, decisions)[0][0]
+
+    def test_the_live_incident_is_detected(self):
+        spread = self._spread(on=12, approved=4)
+        assert spread.approved_qty == 4
+        assert spread.excess_qty == 8
+
+    def test_the_risk_reported_is_the_risk_on_not_the_risk_approved(self):
+        """Three times the position is three times the worst case, and the
+        gate has to be told the truth rather than the intention."""
+        spread = self._spread(on=12, approved=4)
+        assert spread.max_loss == pytest.approx(4980.0)
+
+    def test_an_exactly_sized_position_has_no_excess(self):
+        assert self._spread(on=4, approved=4).excess_qty == 0
+
+    def test_a_partial_fill_is_not_an_excess(self):
+        """Fewer contracts than approved is under-exposure, not a breach."""
+        assert self._spread(on=2, approved=4).excess_qty == 0
+
+    def test_an_orphan_has_no_approved_size_to_compare_against(self):
+        legs = [leg("AAPL260918P00302500", -2, cost_basis=-900)]
+        spread = pos_mod.reconcile(legs, [])[0][0]
+        assert spread.state == pos_mod.ORPHAN
+        assert spread.excess_qty == 0
+
+    def test_the_breach_is_written_to_the_record(self):
+        log = self._spread(on=12, approved=4).as_log()
+        assert log["qty"] == 12
+        assert log["approved_qty"] == 4
+        assert log["excess_qty"] == 8
