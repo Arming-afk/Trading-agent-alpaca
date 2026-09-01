@@ -1,0 +1,56 @@
+name: ops
+
+# Manual only. The trading workflow is the automation; this is the hand on the
+# account when the automation has left something behind — the state a scheduled
+# job should never decide to change on its own.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "What to do"
+        type: choice
+        options:
+          - report
+          - cancel-open-orders
+        default: report
+      dry_run:
+        description: "List what would change and stop"
+        type: boolean
+        default: false
+
+concurrency:
+  # Shares the trading group: a cleanup must never run while a pass is
+  # mid-submission, and a pass must never run while orders are being cancelled.
+  group: daily-trading
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: python -m pip install -r requirements.txt
+
+      - name: Install Alpaca CLI
+        run: |
+          ./scripts/install_cli.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run the command
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: |
+          python scripts/ops.py "${{ inputs.command }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

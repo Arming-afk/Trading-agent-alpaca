@@ -98,13 +98,34 @@ def poll(order_id: str) -> tuple[str, int]:
         return "unknown", 0
 
 
-def _cancel(order_id: str) -> None:
+def _cancel(order_id: str) -> bool:
+    """Cancel one order. Returns whether the order is known to be gone.
+
+    The return value is the safety interlock and it is the most important line
+    in this module. A failed cancel followed by a re-submission is not a
+    re-quote — it is a second live order for the same intent, and if both fill
+    the position is twice the size the risk gate approved. On 2026-09-01 that
+    happened six times in one run because the CLI wanted `--order-id` and got a
+    positional argument, so every cancel failed while every replacement was
+    sent anyway.
+
+    An order that is already gone raises too, and that case is a success: the
+    goal is "not live", not "I cancelled it". So the two are separated by
+    asking the broker afterwards rather than by trusting the exception.
+    """
     try:
         cli.cancel_order(order_id)
+        return True
     except cli.AlpacaCLIError as exc:
-        # A cancel that fails because the order already went away is the good
-        # case, not an error worth stopping for.
-        logger.info("cancel of %s returned: %s", order_id, exc)
+        logger.warning("cancel of %s failed: %s", order_id, exc)
+        # The order may still have been cancelled, or may never have been live.
+        # Ask, rather than assume in either direction.
+        status, _filled = poll(order_id)
+        if status in _DEAD or status == "filled":
+            return True
+        logger.error("order %s is still live and could not be cancelled — "
+                     "no replacement will be sent", order_id)
+        return False
 
 
 def chase(pending: list[Pending], *, rounds: int = DEFAULT_ROUNDS,
@@ -151,14 +172,26 @@ def chase(pending: list[Pending], *, rounds: int = DEFAULT_ROUNDS,
                                       "broker_status": status})
                 continue
 
+            if status == "unknown":
+                # The broker could not be read. Leaving a resting day order
+                # alone is the safe failure: it either fills at a price the
+                # gate approved or expires. Cancelling something whose state is
+                # unknown, and replacing it, is how one intent becomes two.
+                item.attempts.append({"round": round_no, "action": "unreadable",
+                                      "why": "order status unavailable — left resting"})
+                still_working.append(item)
+                continue
+
             if item.aggression >= 1.0:
                 # Already crossing both markets. There is no better price to
                 # offer, and paying through the offer is how a defined-risk
                 # trade quietly stops being worth doing.
-                _cancel(item.order_id)
+                cancelled = _cancel(item.order_id)
                 item.status = ABANDONED
-                item.attempts.append({"round": round_no, "action": "abandoned",
-                                      "why": "already at the marketable price"})
+                item.attempts.append({
+                    "round": round_no, "action": "abandoned",
+                    "why": "already at the marketable price",
+                    "cancelled": cancelled})
                 logger.info("%s abandoned — no price left to concede", item.symbol)
                 continue
 
@@ -194,11 +227,18 @@ def _requote(item: Pending, step: float) -> dict:
     qty = spreads.size_for_risk(item.spread, item.risk_budget, net_price=new_limit)
 
     if qty < 1:
-        _cancel(item.order_id)
-        return {"action": "abandoned", "why": "no size fits the budget at the "
+        cancelled = _cancel(item.order_id)
+        return {"action": "abandoned", "cancelled": cancelled,
+                "why": "no size fits the budget at the "
                 f"improved price {new_limit:.2f}", "limit": round(new_limit, 2)}
 
-    _cancel(item.order_id)
+    # The interlock: no replacement until the original is known to be gone.
+    if not _cancel(item.order_id):
+        return {"action": "abandoned", "cancelled": False,
+                "why": "could not cancel the resting order — a replacement "
+                       "would be a second live order for the same intent",
+                "limit": round(new_limit, 2)}
+
     resized = spreads.Vertical(item.spread.kind, item.spread.long_leg,
                                item.spread.short_leg, qty=qty)
     try:

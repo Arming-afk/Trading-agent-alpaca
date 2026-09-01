@@ -281,11 +281,22 @@ def submit_single_option(symbol: str, side: str, qty: int, *,
 
 
 def cancel_order(order_id: str) -> dict:
-    return run("order", "cancel", order_id)
+    """`alpaca order cancel --order-id <id>`.
+
+    The flag is not optional and the id is not positional. Passing it
+    positionally returns `{"error": "--order-id required", "status": 0}` — a
+    zero status on a failed call, which the error envelope catches but which
+    reads like a soft warning in a log. It was not soft: on 2026-09-01 the fill
+    chase cancelled six orders this way, every cancel failed, and the chase
+    submitted a replacement after each one. Nothing was cancelled and the
+    account carried three live orders per intent.
+    """
+    return run("order", "cancel", "--order-id", order_id)
 
 
 def get_order(order_id: str) -> dict:
-    return run("order", "get", order_id)
+    """`alpaca order get --order-id <id>`. Same flag, same trap."""
+    return run("order", "get", "--order-id", order_id)
 
 
 def stock_bars(symbol: str, *, start: str, timeframe: str = "1Day",
