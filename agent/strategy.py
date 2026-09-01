@@ -218,7 +218,27 @@ def classify(symbol: str, *, implied: float | None, realized: float | None,
     else:
         reason = f"IV/RV {ratio:.2f} inside [{cheap_ratio:.2f}, {rich_ratio:.2f}] — no edge claimed"
 
-    if stance != STAND_ASIDE and ratio_ex_jump is not None:
+    # Two independent conditions, because they fail at different places.
+    #
+    # The stance-flip test alone is too coarse near a threshold, and the first
+    # live run proved it within hours: NVDA came back at IV/RV 0.635 with 24.9%
+    # of its realized vol carried by one session, and the ex-jump ratio landed
+    # at 0.846 against a 0.85 cheap threshold. The stance did not flip — by
+    # four thousandths — so a reading that was a quarter one earnings gap was
+    # about to be traded as a statement about the volatility surface.
+    #
+    # So a contaminated window is refused on its own terms. The question the
+    # ratio is supposed to answer is whether implied is dislocated against what
+    # the stock has been doing; when a quarter of "what the stock has been
+    # doing" is a single event that has already happened, the ratio is not
+    # measuring that, and how close it lands to a threshold is beside the point.
+    if stance != STAND_ASIDE and jump is not None and jump > vol.JUMP_TOLERANCE:
+        jump_blocked = True
+        stance = STAND_ASIDE
+        reason = (f"IV/RV {ratio:.2f} rests on one session — {jump:.0%} of "
+                  f"realized vol is a single day (ex-jump {ratio_ex_jump:.2f}); "
+                  f"the denominator is an event, not a volatility reading")
+    elif stance != STAND_ASIDE and ratio_ex_jump is not None:
         robust = _stance_for(ratio_ex_jump, rich_ratio, cheap_ratio)
         if robust != stance:
             jump_blocked = True

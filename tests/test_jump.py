@@ -81,7 +81,10 @@ class TestClassifyRobustness:
         assert regime.ratio < CHEAP_RATIO          # the naive read says buy
         assert regime.stance == STAND_ASIDE        # the robust read refuses
         assert regime.jump_blocked
-        assert "largest day" in regime.reason
+        # Either branch may claim it — the window here is contaminated enough
+        # to be refused on its own terms before the stance-flip test runs. What
+        # matters is that the reason names the single day, so the log says why.
+        assert "one session" in regime.reason or "largest day" in regime.reason
 
     def test_a_clean_cheap_reading_still_trades(self):
         realized = vol.realized_vol(SMOOTH)
@@ -149,3 +152,79 @@ class TestClassifyRobustness:
         regime = classify("AAPL", implied=None, realized=0.25, closes=SMOOTH)
         assert regime.stance == STAND_ASIDE
         assert regime.ratio is None
+
+
+class TestContaminatedWindowIsRefusedOnItsOwnTerms:
+    """The near-miss the first live run produced, four hours after the filter
+    shipped.
+
+    NVDA came back at IV/RV 0.635 with 24.9% of its realized vol carried by one
+    session. Dropping that session moved the ratio to 0.846 — against a 0.85
+    cheap threshold, so the stance did not flip, by four thousandths. The
+    stance-flip test alone would have traded a reading that was a quarter one
+    earnings gap.
+    """
+
+    #: The live values, from logs/decisions.jsonl on 2026-09-01.
+    LIVE_RATIO = 0.6351481580080145
+    LIVE_JUMP = 0.24936497030174648
+
+    def _closes_with_jump_fraction(self, target: float) -> list[float]:
+        """A path whose jump ratio brackets `target`."""
+        for gap in [x / 1000 for x in range(20, 400)]:
+            closes = series(0.004, jump=-gap)
+            ratio = vol.jump_ratio(closes)
+            if ratio is not None and ratio >= target:
+                return closes
+        raise AssertionError("no path reached the requested jump fraction")
+
+    def test_the_live_near_miss_is_now_refused(self):
+        closes = self._closes_with_jump_fraction(self.LIVE_JUMP)
+        realized = vol.realized_vol(closes)
+        jump = vol.jump_ratio(closes)
+
+        # An implied vol that puts the naive ratio below CHEAP_RATIO while the
+        # ex-jump ratio lands just above it — the exact geometry of the miss.
+        implied = realized * 0.63
+        regime = classify("NVDA", implied=implied, realized=realized, closes=closes)
+
+        assert jump > vol.JUMP_TOLERANCE
+        assert regime.stance == STAND_ASIDE
+        assert regime.jump_blocked
+        assert "rests on one session" in regime.reason
+
+    def test_a_contaminated_window_is_refused_even_when_the_stance_holds(self):
+        """The point of the second condition.
+
+        If both readings agree, the stance-flip test has nothing to say. That
+        agreement is not evidence when a quarter of the denominator is one
+        event: the ratio is not measuring what the ratio is for.
+        """
+        closes = self._closes_with_jump_fraction(0.30)
+        realized = vol.realized_vol(closes)
+        for multiple in (0.3, 0.5, 0.7):        # comfortably "cheap" both ways
+            regime = classify("X", implied=realized * multiple,
+                              realized=realized, closes=closes)
+            assert regime.stance == STAND_ASIDE
+            assert regime.jump_blocked
+
+    def test_an_ordinary_window_is_untouched(self):
+        """Every symbol carries some largest day. Blocking on that would stop
+        the agent trading at all — the ordinary readings on 2026-09-01 ran 6%
+        to 18.5%, all below the tolerance.
+        """
+        realized = vol.realized_vol(SMOOTH)
+        assert vol.jump_ratio(SMOOTH) < vol.JUMP_TOLERANCE
+        regime = classify("AAPL", implied=realized * 1.6, realized=realized,
+                          closes=SMOOTH)
+        assert regime.stance == SELL_PREMIUM
+        assert not regime.jump_blocked
+
+    def test_it_still_cannot_create_a_trade(self):
+        closes = self._closes_with_jump_fraction(0.30)
+        realized = vol.realized_vol(closes)
+        # An ordinary reading, inside the band: contamination must not push it
+        # out of the band in either direction.
+        regime = classify("X", implied=realized * 1.0, realized=realized,
+                          closes=closes)
+        assert regime.stance == STAND_ASIDE
