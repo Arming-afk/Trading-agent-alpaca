@@ -14,7 +14,7 @@ and graded every one NOT SUPPORTED, so building this entry on one would repeat a
 finished experiment.
 
 It trades a **structural** claim instead: options are usually priced above the
-volatility that subsequently arrives. Each scheduled run measures, per symbol,
+volatility that subsequently arrives. Each pass measures, per symbol,
 at-the-money implied volatility from the option chain against 20-day realized
 volatility from split-adjusted daily bars, and acts on the ratio:
 
@@ -24,34 +24,48 @@ volatility from split-adjusted daily bars, and acts on the ratio:
 | 0.85 – 1.30 | ordinary | **stand aside** |
 | ≤ 0.85 | premium cheap | debit spread in the direction of trend |
 
-Standing aside is the common case: in the dry runs, six of eight symbols
-declined. Direction enters only to choose *which side* to sell — a
-spot-versus-moving-average read whose sole job is to avoid selling puts into a
-sustained decline. It is documented in the code as carrying no claim of edge.
+Standing aside is the common case. Direction enters only to choose *which side*
+to sell — a spot-versus-moving-average read whose sole job is to avoid selling
+puts into a sustained decline. It is documented in the code as carrying no claim
+of edge.
 
 Thresholds are a-priori, set from the published behaviour of the variance risk
-premium rather than from results. One correction was made during the build,
-before any order was placed: the first pass used 0.95 as "cheap", which is
-roughly the middle of the normal range, and six of eight symbols traded on the
-claim that premium was unusually cheap when it was merely unremarkable. The
-reasoning and its timing are recorded in `agent/strategy.py`. They are not
-revisited on the strength of the competition's P&L — tuning a threshold against
-the record it is judged by is circular.
+premium rather than from results, and are not revisited on the strength of the
+competition's P&L — tuning a threshold against the record it is judged by is
+circular.
+
+**The denominator can break, and that is the interesting part.** Close-to-close
+realized vol cannot tell a jump from volatility. One earnings gap inside the
+20-day window inflates it, the ratio reads low, and options look cheap — while
+implied has already been crushed by the same event. Both errors point the same
+way, so the agent is most likely to buy premium exactly when premium is least
+worth buying. It did: NVDA, 2026-08-31, IV/RV 0.63 off a 45% realized reading.
+
+So the window is now measured twice, once with its largest single return
+removed, and a stance must clear both a **contamination** test (no more than 20%
+of the reading resting on one session) and a **robustness** test (dropping that
+day must not change the bucket). Both readings are logged whether or not they
+changed anything. The check can only ever remove a trade. A curated earnings
+calendar blocks a known print inside the holding period; it ships empty on
+purpose, because guessed dates would authorise trades on numbers nobody checked,
+and an unlisted symbol is reported as `unknown` rather than clear.
+
+An **LLM advisor** runs last and can only veto — never propose, size, or
+overturn a gate. Its brief excludes equity and quantity, because knowing the
+account invites reasoning about size and size is not its decision. It fails
+open: an outage must not be able to halt the strategy.
 
 **What would falsify the thesis:** if credit spreads lose money while IV/RV was
-above the threshold at entry, the premium was not actually rich. Every entry
-logs its IV, RV, ratio and regime so the question is settled from the record.
+above the threshold at entry, the premium was not rich. `scripts/outcomes.py`
+joins every entry back to its result and answers that from the record — or
+declines to, in as many words, when the sample is too small to distinguish the
+thesis from noise.
 
 ## Risk gates
 
 Every position is a **two-leg vertical**, so its worst case is known exactly, in
-dollars, before the order is sent. That is what makes the portfolio gates
-arithmetic on a known number rather than an estimate from a model. Both legs
-ride on one `mleg` order — a partial fill on a vertical is not a defined-risk
-position.
-
-Four pure functions run on every trade; one failure blocks it and the reason is
-logged:
+dollars, before the order is sent. Both legs ride on one `mleg` order — a
+partial fill on a vertical is not a defined-risk position.
 
 | Gate | Limit | Prevents |
 |---|---|---|
@@ -60,12 +74,14 @@ logged:
 | Daily trades | 3 | A bug or news day becoming correlated size |
 | Per-trade budget | 2% of equity | One spread dominating the book |
 
-Two rules the tests enforce: **missing data blocks new risk** (unknown equity
-means no trade, not an unsized one), and **the per-trade budget is clipped to
-portfolio headroom**, or the portfolio cap would be breachable one trade at a
-time. Contracts are rejected outright — never sized down — when the bid/ask
-exceeds 10% of mid or open interest is under 100. Positions close at 60% of max
-profit or 5 DTE, whichever comes first.
+Four rules the tests enforce: **missing data blocks new risk**; **the per-trade
+budget is clipped to portfolio headroom**; **sizing uses the price the order is
+sent at, not the midpoint** — the concession toward the marketable side is
+always in the direction of more risk; and **open risk is each spread's recorded
+worst case**, joined from the journal, not the sum of the legs' cost bases.
+Contracts are rejected outright — never sized down — when the bid/ask exceeds
+10% of mid or open interest is under 100. Positions close at 60% of the
+*package's* max profit or 5 DTE, in one order.
 
 ## Alpaca infrastructure
 
@@ -83,33 +99,57 @@ is visible via `ps` and which we log.
 | Quotes, greeks, implied vol | `alpaca data option chain` |
 | Realized-vol input | `alpaca data bars --adjustment split` |
 | **Spread submission** | `alpaca order submit --order-class mleg --legs …` |
+| Chase and withdrawal | `alpaca order get --order-id` · `alpaca order cancel --order-id` |
 
-`.github/workflows/daily-trading.yml` runs the agent at 14:00 UTC on weekdays —
-half an hour after the open, so quotes are real rather than overnight stubs —
-and commits the day's records back to the repository.
-
-**Three API behaviours worth publishing**, each of which cost real debugging:
+**Four API behaviours worth publishing**, each of which cost real debugging:
 
 1. Neither options endpoint is sufficient alone. `data option chain` returns
    quotes, greeks and implied volatility but **no open interest**; `option
    contracts` returns open interest but **no quotes or greeks**. Filtering on
    open interest against the chain alone rejected 62 of 62 SPY strikes whose
    markets were as tight as 0.2%. `agent/market.py` joins them by OCC symbol.
-2. `impliedVolatility` is a **sibling** of `greeks`, not a member of it. Reading
-   it from inside `greeks` yields None for every contract and the strategy
-   stands aside forever.
+2. `impliedVolatility` is a **sibling** of `greeks`, not a member of it.
 3. The chain endpoint returns whatever fits under `--limit` — the nearest
-   weeklies — unless the expiry range is passed explicitly, so the liquid
-   monthly is never seen and strike selection is left choosing among thin
-   contracts.
+   weeklies — unless the expiry range is passed explicitly.
+4. `order get` and `order cancel` take the id as **`--order-id`**, not
+   positionally, and report the rejection with `"status": 0` — a zero status on
+   a failed call, which reads like a warning and is not one.
+
+**The schedule is not reliable, and the agent is built for that.** GitHub's cron
+is best-effort: the original single 14:00 UTC trigger fired once at 19:43 —
+seventeen minutes before the close — and on the next session not at all. The run
+is now attempted every thirty minutes and made idempotent; the first pass to
+land surveys, the rest manage positions and chase fills. A heartbeat workflow
+fails after the close if a session produced no run record, and a failed workflow
+is the notification.
+
+## What the live account taught us
+
+Four defects survived 175 unit tests and a dry run. All four needed a real
+account, and they are in the README with their fixes because the failure modes
+transfer better than the strategy does.
+
+The sharpest was an execution failure. `order cancel` rejected a positional id;
+during a chased run six cancels failed while the chase sent a more aggressive
+replacement after each one, and all of them filled. The account ended up
+carrying six SPY spreads against an approved two and twelve AAPL against four —
+4.0% and 5.0% of equity against a 2% cap. The flag was the trigger; the bug was
+that a re-quote could proceed on an unconfirmed cancel at all. A re-quote now
+refuses to send a replacement until the original is known to be gone,
+`OpenSpread.excess_qty` makes the breach visible at all — the broker reports a
+position and nothing about how large it was meant to be — and `ops.py trim`
+closed exactly the excess. The account was inside every limit thirteen minutes
+later, and the entire sequence, including the breach, is in the committed log.
 
 ## Verification
 
-166 tests, no network: `subprocess.run` is faked, so the CLI tests assert command
+285 tests, no network: `subprocess.run` is faked, so the CLI tests assert command
 construction and success/failure discrimination. Spread arithmetic is checked
 against hand-computed values plus two invariants that hold across all four
 vertical types — max loss plus max gain equals the strike width, and breakeven
-falls between the strikes. Several tests are regressions pinned to bugs the live
-API exposed and unit tests alone could not have caught, including legs drawn from
-two different expiries — which is not a vertical at all, and would have made
-`max_loss` a fiction that every risk gate then sized against.
+falls between the strikes — checked at a traded price as well as at the midpoint.
+
+Several tests are regressions pinned to bugs unit tests alone could not have
+caught: legs drawn from two different expiries; the midpoint sizing breach; the
+cost-basis risk total; the per-leg profit target; the unconfirmed cancel; and the
+jump-contaminated window that cleared the robustness test by four thousandths.
