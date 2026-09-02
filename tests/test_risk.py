@@ -141,3 +141,98 @@ class TestHighWaterMark:
 
     def test_is_none_with_no_data(self):
         assert high_water_mark([]) is None
+
+
+class TestUnderlyingRiskGate:
+    """The gap between the per-trade cap and the portfolio cap.
+
+    Each entry is gated on its own and passes at 2% of equity; nothing was
+    watching what several of them added up to in one name. AAPL reached 5.2%
+    of the account across two separately-approved entries at identical strikes
+    — one position in every sense except the journal's, and one gap down would
+    have treated it as such.
+    """
+
+    def test_a_name_under_the_limit_passes(self):
+        result = risk.underlying_risk_gate("AAPL", 2_000.0, 100_000.0,
+                                           max_underlying_risk_pct=5.0)
+        assert result.passed
+        assert "2.00%" in result.detail
+
+    def test_a_name_at_the_limit_blocks(self):
+        result = risk.underlying_risk_gate("AAPL", 5_000.0, 100_000.0,
+                                           max_underlying_risk_pct=5.0)
+        assert not result.passed
+        assert "AAPL" in result.detail
+
+    def test_the_live_concentration_blocks(self):
+        """AAPL at $5,176 of $100,098 — 5.17%, over a 5% limit."""
+        result = risk.underlying_risk_gate("AAPL", 5_176.0, 100_098.0,
+                                           max_underlying_risk_pct=5.0)
+        assert not result.passed
+
+    def test_a_different_name_is_unaffected(self):
+        """Blocking AAPL must not stop the agent trading SPY."""
+        result = risk.underlying_risk_gate("SPY", 2_703.0, 100_098.0,
+                                           max_underlying_risk_pct=5.0)
+        assert result.passed
+
+    def test_missing_equity_blocks_new_risk(self):
+        assert not risk.underlying_risk_gate("AAPL", 1.0, None).passed
+
+    def test_a_zero_limit_disables_the_gate(self):
+        assert risk.underlying_risk_gate("AAPL", 99_000.0, 100_000.0,
+                                         max_underlying_risk_pct=0).passed
+
+    def test_an_unnamed_underlying_says_so_rather_than_passing_silently(self):
+        result = risk.underlying_risk_gate(None, 0.0, 100_000.0)
+        assert result.passed
+        assert "no underlying supplied" in result.detail
+
+
+class TestUnderlyingHeadroom:
+    """The budget is clipped to the name's remaining room, not only the
+    portfolio's — otherwise the cap is breachable one trade at a time, which is
+    the same hole the portfolio clip was written to close."""
+
+    def _verdict(self, underlying_risk):
+        return risk.evaluate(equity=100_000.0, high_water_mark=100_000.0,
+                             open_risk=10_000.0, trades_today=0,
+                             underlying="AAPL", underlying_risk=underlying_risk,
+                             overrides={"max_underlying_risk_pct": 5.0,
+                                        "max_trade_risk_pct": 2.0})
+
+    def test_an_empty_name_gets_the_full_per_trade_budget(self):
+        assert self._verdict(0.0).risk_budget == pytest.approx(2_000.0)
+
+    def test_a_nearly_full_name_gets_only_what_is_left(self):
+        # 5% of 100k is 5,000; 4,200 is on, so 800 remains — less than the
+        # 2,000 the per-trade cap would otherwise allow.
+        assert self._verdict(4_200.0).risk_budget == pytest.approx(800.0)
+
+    def test_a_full_name_is_blocked_outright(self):
+        verdict = self._verdict(5_000.0)
+        assert not verdict.allowed
+        assert "underlying_risk" in verdict.blocked_by
+
+    def test_the_gate_is_named_in_the_log_when_it_blocks(self):
+        assert "AAPL already carries" in self._verdict(5_000.0).reason()
+
+    def test_it_never_closes_anything(self):
+        """Like the drawdown breaker, it blocks new risk and leaves open
+        spreads alone: they are defined-risk and already paid for."""
+        verdict = self._verdict(5_000.0)
+        assert verdict.risk_budget == 0.0
+
+
+class TestRiskByUnderlying:
+    def test_entries_in_one_name_are_added_together(self):
+        from agent.positions import OpenSpread, risk_by_underlying
+        spreads = [
+            OpenSpread("AAPL", "bull_put_credit", None, "a", "b", 8, 3308.0, 692.0),
+            OpenSpread("AAPL", "bull_put_credit", None, "c", "d", 9, 1868.0, 382.0),
+            OpenSpread("SPY", "bear_call_credit", None, "e", "f", 2, 1344.0, 256.0),
+        ]
+        totals = risk_by_underlying(spreads)
+        assert totals["AAPL"] == pytest.approx(5176.0)
+        assert totals["SPY"] == pytest.approx(1344.0)

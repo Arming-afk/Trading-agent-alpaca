@@ -97,6 +97,14 @@ correction made during the build is documented in `agent/strategy.py` with its
 reasoning and its timestamp — it was made before any order was placed, on the
 basis of published behaviour rather than results.
 
+The one limit *added* mid-competition is `underlying_risk`, on 2026-09-02, and
+the distinction is worth being precise about. It is not a threshold moved to
+improve a number: it closes a hole through which a limit already stated here —
+that no one spread dominates the book — could be walked around by entering the
+same spread twice. Its value is derived from the per-trade cap already in the
+table, not from the position that exposed it. But it was chosen by someone who
+could see that position, and `agent/config.py` says so where the number lives.
+
 **4 · The record has to survive contact with the account.**
 A decision log is not an audit trail if the broker can disagree with it. Alpaca
 reports option positions leg by leg and knows nothing about the spread they
@@ -131,7 +139,7 @@ tell a correct position from a tripled one.
        │                       ▼                        │
        │                 ┌───────────┐            ┌─────▼──────┐
        │                 │  spreads  │            │    risk    │
-       │                 │ max_loss  │───────────▶│  4 gates   │
+       │                 │ max_loss  │───────────▶│  5 gates   │
        │                 │  at limit │            │  + sizing  │
        │                 └─────┬─────┘            └─────┬──────┘
        │                       │                        ▼
@@ -212,10 +220,22 @@ goes into the log.
 |---|---|---|
 | `drawdown` | 10% | New positions while equity is far below its peak. |
 | `portfolio_risk` | 25% | Twenty 2% trades quietly becoming a 40% bet. |
+| `underlying_risk` | 5% | Several approved entries stacking up in one name. |
 | `daily_trades` | 3/day | A bug or a news day turning into correlated size. |
 | per-trade budget | 2% | Any one spread dominating the book. |
 
-Four rules the tests enforce:
+`underlying_risk` closes a gap between the other two, and it was found by the
+account rather than by reasoning. The per-trade budget looks at one spread and
+the portfolio cap looks at all of them; neither looks at a *name*. So the agent
+read AAPL as rich on two consecutive days, opened a spread at the same strikes
+each time — both approved on their own terms, each inside 2% — and ended up
+with 5.2% of the account on one strike pair and one expiry. Two entries at the
+same strikes are not two positions: the broker nets them into one, and so does
+a gap down. The limit is 2.5x the per-trade cap, which allows two or three
+concurrent positions in a name and refuses a fourth. It blocks new risk and
+never closes what is open, for the same reason the drawdown breaker does not.
+
+Five rules the tests enforce:
 
 - **Missing data blocks new risk.** Unlike a monitoring system, where a missing
   datum should mean "do not intervene", here the gate is the only thing sizing
@@ -230,6 +250,9 @@ Four rules the tests enforce:
   journal and scaled to the quantity the broker reports. It is not the sum of
   the legs' cost bases, which for a credit spread answers a different question
   entirely.
+- **Every budget is clipped to the headroom of every cap it shares**, the
+  portfolio's and the underlying's alike. A cap that only blocks the trade
+  which crosses it is breachable one trade at a time.
 
 Positions are closed at **60% of the package's maximum profit**, or at 5 DTE —
 whichever comes first, and always as one `mleg` order. Taking profit early on
@@ -489,7 +512,7 @@ multi-leg limit fills and how far from the mid it has to sit to do it.
 ## Tests
 
 ```bash
-python3 -m pytest -q      # 285 tests, no network
+python3 -m pytest -q      # 296 tests, no network
 ```
 
 `subprocess.run` is faked, so the CLI tests assert command construction

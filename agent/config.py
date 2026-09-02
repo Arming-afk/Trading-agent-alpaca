@@ -59,6 +59,17 @@ MAX_PORTFOLIO_RISK_PCT = _num("RISK_MAX_PORTFOLIO_RISK_PCT", 25.0)
 MAX_TRADE_RISK_PCT = _num("RISK_MAX_TRADE_RISK_PCT", 2.0)
 MAX_NEW_TRADES_PER_DAY = _int("RISK_MAX_NEW_TRADES_PER_DAY", 3)
 
+# Sum of max-loss across every open spread on one underlying. Derived from the
+# limits already here rather than from any book: at 2.5x the per-trade cap it
+# allows two or three concurrent positions in a name and refuses a fourth.
+#
+# Stated plainly because the record should not have to guess: this was added on
+# 2026-09-02, after the book already showed AAPL at 5.2%. The multiple comes
+# from the existing per-trade cap, not from that number — but it was chosen by
+# someone who could see it, and a reader is entitled to know that.
+MAX_UNDERLYING_RISK_PCT = _num("RISK_MAX_UNDERLYING_RISK_PCT",
+                               MAX_TRADE_RISK_PCT * 2.5)
+
 # ── contract selection guardrails ────────────────────────────────────────────
 MIN_DTE = _int("MIN_DTE", 7)
 MAX_DTE = _int("MAX_DTE", 45)

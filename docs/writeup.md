@@ -71,14 +71,19 @@ partial fill on a vertical is not a defined-risk position.
 |---|---|---|
 | Drawdown breaker | 10% below the high-water mark | Trading into a decline |
 | Portfolio risk | 25% of equity across open spreads | Twenty 2% trades becoming a 40% bet |
+| Underlying risk | 5% of equity in one name | Approved entries stacking at the same strikes |
 | Daily trades | 3 | A bug or news day becoming correlated size |
 | Per-trade budget | 2% of equity | One spread dominating the book |
 
-Four rules the tests enforce: **missing data blocks new risk**; **the per-trade
-budget is clipped to portfolio headroom**; **sizing uses the price the order is
-sent at, not the midpoint** — the concession toward the marketable side is
-always in the direction of more risk; and **open risk is each spread's recorded
-worst case**, joined from the journal, not the sum of the legs' cost bases.
+Five rules the tests enforce: **missing data blocks new risk**; **every budget
+is clipped to the headroom of every cap it shares**, since a cap that only
+blocks the trade which crosses it is breachable one trade at a time; **sizing
+uses the price the order is sent at, not the midpoint** — the concession toward
+the marketable side is always in the direction of more risk; **open risk is
+each spread's recorded worst case**, joined from the journal, not the sum of
+the legs' cost bases; and **entries at the same strikes are one position**, in
+the risk total and in the outcome report alike, because that is what the broker
+holds.
 Contracts are rejected outright — never sized down — when the bid/ask exceeds
 10% of mid or open interest is under 100. Positions close at 60% of the
 *package's* max profit or 5 DTE, in one order.
@@ -125,7 +130,7 @@ is the notification.
 
 ## What the live account taught us
 
-Four defects survived 175 unit tests and a dry run. All four needed a real
+Seven defects survived 175 unit tests and a dry run. All four needed a real
 account, and they are in the README with their fixes because the failure modes
 transfer better than the strategy does.
 
@@ -143,7 +148,7 @@ later, and the entire sequence, including the breach, is in the committed log.
 
 ## Verification
 
-285 tests, no network: `subprocess.run` is faked, so the CLI tests assert command
+296 tests, no network: `subprocess.run` is faked, so the CLI tests assert command
 construction and success/failure discrimination. Spread arithmetic is checked
 against hand-computed values plus two invariants that hold across all four
 vertical types — max loss plus max gain equals the strike width, and breakeven

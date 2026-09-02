@@ -228,6 +228,7 @@ def main(argv=None) -> int:
     # ── reconcile ────────────────────────────────────────────────────────────
     open_spreads, unexplained = pos_mod.reconcile(broker_legs)
     open_risk = pos_mod.open_risk(open_spreads)
+    underlying_risk = pos_mod.risk_by_underlying(open_spreads)
     logger.info("equity %.2f | high-water %.2f | %d legs → %d spreads | open risk %.2f",
                 equity, hwm or 0, len(broker_legs), len(open_spreads), open_risk)
     for item in unexplained:
@@ -237,6 +238,7 @@ def main(argv=None) -> int:
     if closed:
         open_spreads, unexplained = pos_mod.reconcile(cli.positions())
         open_risk = pos_mod.open_risk(open_spreads)
+        underlying_risk = pos_mod.risk_by_underlying(open_spreads)
 
     trades_today = journal.trades_opened_today(str(today))
     advisor = advisor_mod.Advisor.from_config()
@@ -284,12 +286,16 @@ def main(argv=None) -> int:
     pending: list[execution.Pending] = []
     for cand in candidates:
         symbol = cand.regime.symbol
+        on_this_name = underlying_risk.get(symbol.upper(), 0.0)
         verdict = risk.evaluate(equity=equity, high_water_mark=hwm,
                                 open_risk=open_risk,
-                                trades_today=trades_today + opened)
+                                trades_today=trades_today + opened,
+                                underlying=symbol,
+                                underlying_risk=on_this_name)
         risk_log = {"allowed": verdict.allowed, "budget": round(verdict.risk_budget, 2),
                     "blocked_by": verdict.blocked_by, "detail": verdict.reason(),
-                    "open_risk": round(open_risk, 2)}
+                    "open_risk": round(open_risk, 2),
+                    "underlying_risk": round(on_this_name, 2)}
         if args.max_contracts is not None:
             risk_log["max_contracts_cap"] = args.max_contracts
         if not verdict.allowed:
@@ -376,6 +382,7 @@ def main(argv=None) -> int:
                              reason=cand.rationale)
         opened += 1
         open_risk += risk_at_limit
+        underlying_risk[symbol.upper()] = on_this_name + risk_at_limit
         pending.append(execution.Pending(
             symbol=symbol, spread=sized, order_id=str(order.get("id") or ""),
             limit_price=limit, aggression=args.aggression,
@@ -412,6 +419,7 @@ def main(argv=None) -> int:
         "open_legs": len(broker_legs),
         "open_spreads": len(open_spreads),
         "open_risk": round(open_risk, 2),
+        "risk_by_underlying": {k: round(v, 2) for k, v in underlying_risk.items()},
         "unexplained_positions": [u.as_log() for u in unexplained],
         "candidates": len(candidates),
         "opened": opened,

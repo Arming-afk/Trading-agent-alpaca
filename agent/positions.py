@@ -319,3 +319,20 @@ def open_risk(spreads: list[OpenSpread]) -> float:
     and got credit spreads badly wrong in the safe-looking direction.
     """
     return sum(s.max_loss for s in spreads)
+
+
+def risk_by_underlying(spreads: list[OpenSpread]) -> dict[str, float]:
+    """Dollars at risk per underlying.
+
+    The number the per-trade cap cannot see. Each entry is gated on its own and
+    passes at 2% of equity; nothing was watching what they added up to in one
+    name until AAPL reached 5.2% across two separately-approved entries at the
+    same strikes — which is one position in every sense except the journal's.
+    """
+    out: dict[str, float] = {}
+    for spread in spreads:
+        key = (spread.underlying or "").upper()
+        if not key:
+            continue
+        out[key] = out.get(key, 0.0) + spread.max_loss
+    return out

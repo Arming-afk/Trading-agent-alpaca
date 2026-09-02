@@ -92,6 +92,44 @@ def portfolio_risk_gate(open_risk: float, equity: float | None,
                       f"open risk {used_pct:.2f}% of {limit:.2f}%")
 
 
+def underlying_risk_gate(underlying: str | None, underlying_risk: float,
+                         equity: float | None,
+                         max_underlying_risk_pct: float | None = None) -> GateResult:
+    """Cap the sum of max-loss across every open spread on one underlying.
+
+    The gap this closes is between the two caps that already existed. The
+    per-trade budget looks at one spread and the portfolio cap looks at all of
+    them; neither looks at a name. So the agent could read AAPL as rich on
+    consecutive days, open a 2%-of-equity spread each time — every one of them
+    approved on its own terms — and end up with 5.2% of the account riding on
+    one strike pair and one expiry. Two entries at the same strikes are not two
+    positions; the broker nets them into one, and so does a gap down.
+
+    This gate blocks *new* risk in a name that is already full. It never closes
+    what is open, for the same reason the drawdown breaker does not: those
+    spreads are defined-risk and already paid for.
+    """
+    limit = (config.MAX_UNDERLYING_RISK_PCT if max_underlying_risk_pct is None
+             else max_underlying_risk_pct)
+    if limit <= 0:
+        return GateResult("underlying_risk", True, "disabled")
+    if not underlying:
+        # Callers that do not name the underlying are not exempt from the rule;
+        # they simply cannot be evaluated against it, and saying so in the log
+        # is better than a silent pass that reads like one.
+        return GateResult("underlying_risk", True, "no underlying supplied")
+    if equity is None or equity <= 0:
+        return GateResult("underlying_risk", False, "equity unavailable")
+
+    used_pct = underlying_risk / equity * 100
+    if used_pct >= limit:
+        return GateResult("underlying_risk", False,
+                          f"{underlying} already carries {used_pct:.2f}% "
+                          f">= {limit:.2f}%")
+    return GateResult("underlying_risk", True,
+                      f"{underlying} at {used_pct:.2f}% of {limit:.2f}%")
+
+
 def daily_trade_gate(trades_today: int,
                      max_new_trades: int | None = None) -> GateResult:
     """Cap new positions per day. Guards against a bug or a bad news day
@@ -122,24 +160,37 @@ def open_risk_from_positions(spreads: list[Vertical]) -> float:
 
 def evaluate(*, equity: float | None, high_water_mark: float | None,
              open_risk: float, trades_today: int,
+             underlying: str | None = None, underlying_risk: float = 0.0,
              overrides: dict | None = None) -> RiskVerdict:
     """Run every gate. An order is allowed only if all of them pass."""
     o = overrides or {}
     gates = [
         drawdown_gate(equity, high_water_mark, o.get("max_drawdown_pct")),
         portfolio_risk_gate(open_risk, equity, o.get("max_portfolio_risk_pct")),
+        underlying_risk_gate(underlying, underlying_risk, equity,
+                             o.get("max_underlying_risk_pct")),
         daily_trade_gate(trades_today, o.get("max_new_trades")),
     ]
     allowed = all(g.passed for g in gates)
     budget = trade_risk_budget(equity, o.get("max_trade_risk_pct")) if allowed else 0.0
 
-    # Never let one trade exceed what is left under the portfolio cap.
+    # Never let one trade exceed what is left under a cap it has to share.
+    # Both headrooms are applied, for the same reason the portfolio one always
+    # was: a cap that only blocks the trade that crosses it is breachable one
+    # trade at a time.
     if allowed and equity and equity > 0:
         pf_limit = (config.MAX_PORTFOLIO_RISK_PCT
                     if o.get("max_portfolio_risk_pct") is None
                     else o["max_portfolio_risk_pct"])
         if pf_limit > 0:
             headroom = max(equity * pf_limit / 100 - open_risk, 0.0)
+            budget = min(budget, headroom)
+
+        ul_limit = (config.MAX_UNDERLYING_RISK_PCT
+                    if o.get("max_underlying_risk_pct") is None
+                    else o["max_underlying_risk_pct"])
+        if ul_limit > 0 and underlying:
+            headroom = max(equity * ul_limit / 100 - underlying_risk, 0.0)
             budget = min(budget, headroom)
 
     return RiskVerdict(allowed=allowed and budget > 0, gates=gates, risk_budget=budget)
