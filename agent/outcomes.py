@@ -114,6 +114,36 @@ class Outcome:
         }
 
 
+def _leg_key(spec: dict) -> tuple[str, str]:
+    return (str(spec.get("long_leg") or ""), str(spec.get("short_leg") or ""))
+
+
+def _qty_by_leg_pair(decisions: list[dict]) -> dict[tuple[str, str], dict]:
+    """Total contracts entered against each pair of legs, and how many entries.
+
+    Needed because the broker has no notion of an entry — it holds one netted
+    position per contract, however many separate decisions built it.
+    """
+    out: dict[tuple[str, str], dict] = {}
+    for row in decisions:
+        if row.get("action") != "opened":
+            continue
+        spec = row.get("spread") or {}
+        bucket = out.setdefault(_leg_key(spec), {"qty": 0, "entries": 0})
+        bucket["qty"] += max(int(_f(spec.get("qty"), 1)), 0)
+        bucket["entries"] += 1
+    return out
+
+
+def _share(spec: dict, entered: dict[tuple[str, str], dict]) -> float:
+    """This entry's fraction of the netted position it belongs to."""
+    bucket = entered.get(_leg_key(spec))
+    total = bucket["qty"] if bucket else 0
+    if total <= 0:
+        return 1.0
+    return max(int(_f(spec.get("qty"), 1)), 0) / total
+
+
 def _closing_records(decisions: list[dict]) -> dict[str, list[dict]]:
     """Closing records keyed by the leg symbol they closed."""
     out: dict[str, list[dict]] = {}
@@ -139,6 +169,7 @@ def build(decisions: list[dict] | None = None,
     live = {p.get("symbol"): p for p in (positions or [])}
     closes = _closing_records(records)
     order_view = orders or {}
+    entered = _qty_by_leg_pair(records)
 
     out: list[Outcome] = []
     for row in records:
@@ -158,8 +189,20 @@ def build(decisions: list[dict] | None = None,
 
         if legs:
             status = OPEN
-            pl = sum(_f(p.get("unrealized_pl")) for p in legs)
+            # The broker nets entries at the same strikes into one position, so
+            # its P&L belongs to all of them. Attribute it by each entry's share
+            # of the contracts, which keeps every entry's own IV/RV reading —
+            # the whole point of this report — while making the total add up.
+            #
+            # Reading the position's P&L once per entry, as this did, counted
+            # the live AAPL 260925 P305/P310 twice: two approved entries of four
+            # contracts, one netted position, and a credit-side loss reported as
+            # $521 when it was $277.
+            share = _share(spec, entered)
+            pl = sum(_f(p.get("unrealized_pl")) for p in legs) * share
             note = "marked to market" if len(legs) == 2 else "one leg open"
+            if share < 1.0:
+                note += f"; {share:.0%} of a position entered {entered[_leg_key(spec)]['entries']}x"
         else:
             broker_order = order_view.get(str(order.get("id") or ""), {})
             filled = _f(broker_order.get("filled_qty"), -1.0)

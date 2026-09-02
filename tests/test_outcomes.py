@@ -158,3 +158,76 @@ class TestWrite:
         second = (tmp_path / "outcomes.jsonl").read_text(encoding="utf-8")
 
         assert first.count("\n") == second.count("\n")
+
+
+class TestNettedEntries:
+    """Several entries at the same strikes are one position at the broker.
+
+    The report exists to attribute results back to the reading that caused
+    them, so it must keep the entries separate — but it must not read the same
+    position's P&L once per entry. On 2026-09-02 it did: AAPL 260925 P305/P310
+    was entered twice for four contracts, and the credit side's loss was
+    reported as $521 when the positions were down $277.
+    """
+
+    LONG, SHORT = "AAPL260925P00305000", "AAPL260925P00310000"
+
+    def _rows(self, broker_pl_per_leg: float = -98.0):
+        decisions = [
+            opened("AAPL", "bull_put_credit", "sell_premium", 1.35,
+                   self.LONG, self.SHORT, order_id="a", max_loss=1660.0,
+                   ts="2026-09-01T17:23:00Z"),
+            opened("AAPL", "bull_put_credit", "sell_premium", 1.35,
+                   self.LONG, self.SHORT, order_id="b", max_loss=1648.0,
+                   ts="2026-09-02T17:47:00Z"),
+        ]
+        legs = [leg(self.LONG, 8, broker_pl_per_leg),
+                leg(self.SHORT, -8, broker_pl_per_leg)]
+        return outcomes.build(decisions, legs, {})
+
+    def test_the_position_pl_is_counted_once_across_entries(self):
+        rows = self._rows()
+        assert sum(o.pl for o in rows) == pytest.approx(-196.0)
+
+    def test_each_entry_keeps_its_own_reading_and_its_own_risk(self):
+        """Splitting the P&L must not collapse the attribution — the reading at
+        entry is the only thing this report is for."""
+        rows = self._rows()
+        assert len(rows) == 2
+        assert [o.ratio for o in rows] == [1.35, 1.35]
+        assert sorted(o.max_loss for o in rows) == [1648.0, 1660.0]
+
+    def test_the_split_follows_the_share_of_contracts(self):
+        rows = self._rows()
+        assert rows[0].pl == pytest.approx(-98.0)
+        assert rows[1].pl == pytest.approx(-98.0)
+
+    def test_an_uneven_split_follows_the_quantities(self):
+        decisions = [
+            opened("AAPL", "bull_put_credit", "sell_premium", 1.35,
+                   self.LONG, self.SHORT, order_id="a", ts="2026-09-01T17:23:00Z"),
+            opened("AAPL", "bull_put_credit", "sell_premium", 1.35,
+                   self.LONG, self.SHORT, order_id="b", ts="2026-09-02T17:47:00Z"),
+        ]
+        decisions[0]["spread"]["qty"] = 3
+        decisions[1]["spread"]["qty"] = 9
+        legs = [leg(self.LONG, 12, -200.0), leg(self.SHORT, -12, -200.0)]
+        rows = outcomes.build(decisions, legs, {})
+
+        assert rows[0].pl == pytest.approx(-100.0)   # 3/12 of -400
+        assert rows[1].pl == pytest.approx(-300.0)   # 9/12 of -400
+        assert sum(o.pl for o in rows) == pytest.approx(-400.0)
+
+    def test_the_note_says_the_position_was_entered_more_than_once(self):
+        assert "entered 2x" in self._rows()[0].note
+
+    def test_a_single_entry_is_untouched(self):
+        decisions = [opened("AAPL", "bull_put_credit", "sell_premium", 1.41,
+                            LONG, SHORT)]
+        rows = outcomes.build(decisions, [leg(LONG, 9, -120), leg(SHORT, -9, 400)], {})
+        assert rows[0].pl == pytest.approx(280.0)
+        assert "entered" not in rows[0].note
+
+    def test_the_stance_bucket_no_longer_double_counts(self):
+        buckets = outcomes.by_stance(self._rows())
+        assert buckets["sell_premium"].pl == pytest.approx(-196.0)
