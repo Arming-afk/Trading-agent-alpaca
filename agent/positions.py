@@ -156,12 +156,48 @@ class OpenSpread:
         }
 
 
+def _leg_key(spec: dict) -> tuple[str, str]:
+    return (str(spec.get("long_leg") or ""), str(spec.get("short_leg") or ""))
+
+
 def _entries(decisions: list[dict]) -> list[dict]:
-    """Journal records that opened a spread, newest first — the newest record
-    for a leg is the one that describes the position currently on."""
+    """Journal records that opened a spread, newest first."""
     out = [d for d in decisions
            if d.get("action") == "opened" and isinstance(d.get("spread"), dict)]
     out.sort(key=lambda d: str(d.get("timestamp", "")), reverse=True)
+    return out
+
+
+def _authorised(decisions: list[dict]) -> dict[tuple[str, str], dict]:
+    """Everything the gates ever approved for each pair of legs, summed.
+
+    The first version of this took only the newest record and treated the rest
+    as excess, which is wrong the moment the agent enters the same strikes
+    twice. It did, on consecutive days: AAPL 260925 P305/P310 was opened for 4
+    contracts on 2026-09-01 and 4 more on 2026-09-02, both separately approved.
+    The report called the second four an over-fill and told an operator to trim
+    a position that no gate had any objection to — a false alarm that
+    recommends a destructive action, which is worse than no alarm at all.
+
+    So the ceiling is the sum of every open, not the last one. A position is
+    only flagged when it exceeds everything that was ever authorised for those
+    legs, which is exactly the question `excess_qty` is meant to answer.
+
+    The known limitation, stated rather than hidden: closes are not subtracted.
+    Re-entering legs that were previously closed raises the ceiling and could
+    mask a later over-fill. That direction is deliberate — a missed warning
+    costs a warning, while a false one costs contracts.
+    """
+    out: dict[tuple[str, str], dict] = {}
+    for record in _entries(decisions):
+        spec = record["spread"]
+        key = _leg_key(spec)
+        bucket = out.setdefault(key, {"qty": 0, "max_loss": 0.0, "max_gain": 0.0,
+                                      "entries": [], "newest": record})
+        bucket["qty"] += max(int(_f(spec.get("qty"), 1)), 0)
+        bucket["max_loss"] += _f(spec.get("max_loss"))
+        bucket["max_gain"] += _f(spec.get("max_gain"))
+        bucket["entries"].append(record)
     return out
 
 
@@ -209,12 +245,9 @@ def reconcile(positions: list[dict], decisions: list[dict] | None = None
     unexplained: list[OpenSpread] = []
     claimed: set[str] = set()
 
-    for record in _entries(records):
-        spec = record["spread"]
-        long_symbol = spec.get("long_leg")
-        short_symbol = spec.get("short_leg")
+    for (long_symbol, short_symbol), bucket in _authorised(records).items():
         if long_symbol in claimed or short_symbol in claimed:
-            continue                       # an older record for the same legs
+            continue
 
         legs = [option_legs[s] for s in (long_symbol, short_symbol)
                 if s in option_legs]
@@ -222,6 +255,8 @@ def reconcile(positions: list[dict], decisions: list[dict] | None = None
             continue                       # closed, or never filled
 
         claimed.update(p["symbol"] for p in legs)
+        record = bucket["newest"]
+        spec = record["spread"]
         expiration = None
         try:
             _, expiration, _, _ = ch.parse_occ(long_symbol or short_symbol or "")
@@ -232,8 +267,11 @@ def reconcile(positions: list[dict], decisions: list[dict] | None = None
         # is possible even though mleg is meant to prevent it, and the broker
         # is authoritative about how many contracts are actually on.
         filled = min(abs(int(_f(p.get("qty")))) for p in legs)
-        logged_qty = int(spec.get("qty") or filled or 1) or 1
-        scale = (filled / logged_qty) if logged_qty else 1.0
+        approved = max(int(bucket["qty"]), 0)
+        # Risk is the authorised risk scaled to what is actually on. When the
+        # two agree — the normal case, including several entries at the same
+        # strikes — this is just the sum of what each entry recorded.
+        scale = (filled / approved) if approved else 1.0
 
         spread = OpenSpread(
             underlying=spec.get("underlying") or "",
@@ -242,12 +280,12 @@ def reconcile(positions: list[dict], decisions: list[dict] | None = None
             long_symbol=long_symbol,
             short_symbol=short_symbol,
             qty=filled,
-            max_loss=_f(spec.get("max_loss")) * scale,
-            max_gain=_f(spec.get("max_gain")) * scale,
+            max_loss=bucket["max_loss"] * scale,
+            max_gain=bucket["max_gain"] * scale,
             legs=legs,
             state=MATCHED if len(legs) == 2 else PARTIAL,
             entry=record,
-            approved_qty=logged_qty,
+            approved_qty=approved,
         )
         spreads.append(spread)
         if spread.state == PARTIAL:

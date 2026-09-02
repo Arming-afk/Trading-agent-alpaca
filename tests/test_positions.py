@@ -110,18 +110,58 @@ class TestOpenRisk:
         spreads, _ = pos_mod.reconcile([], decisions)
         assert spreads == []
 
-    def test_the_newest_record_wins_when_legs_are_reused(self):
-        """Re-opening the same strikes must not double-count the risk."""
-        legs = [leg(CREDIT_LONG, 5), leg(CREDIT_SHORT, -5)]
+    def test_reused_legs_collapse_into_one_position(self):
+        """Two entries at the same strikes are one position at the broker.
+
+        Alpaca nets them: there is no way to hold "the 09-01 four" and "the
+        09-02 four" as separate positions, so the reconciliation must not
+        report two either.
+        """
+        legs = [leg(CREDIT_LONG, 8), leg(CREDIT_SHORT, -8)]
         decisions = [
             opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
-                   qty=5, max_loss=999.0, timestamp="2026-08-20T14:00:00+00:00"),
+                   qty=4, max_loss=1660.0, max_gain=340.0,
+                   timestamp="2026-09-01T17:23:00+00:00"),
             opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
-                   qty=5, max_loss=1500.0, timestamp="2026-09-01T14:00:00+00:00"),
+                   qty=4, max_loss=1648.0, max_gain=352.0,
+                   timestamp="2026-09-02T17:47:00+00:00"),
         ]
         spreads, _ = pos_mod.reconcile(legs, decisions)
         assert len(spreads) == 1
-        assert spreads[0].max_loss == pytest.approx(1500.0)
+        assert spreads[0].qty == 8
+
+    def test_risk_is_the_sum_of_what_each_entry_recorded(self):
+        """The live 2026-09-02 state, to the dollar.
+
+        AAPL 260925 P305/P310 was entered for 4 contracts on two consecutive
+        days at slightly different prices. The position's worst case is both
+        entries' worst cases added, not either one scaled.
+        """
+        legs = [leg(CREDIT_LONG, 8), leg(CREDIT_SHORT, -8)]
+        decisions = [
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, max_loss=1660.0, max_gain=340.0,
+                   timestamp="2026-09-01T17:23:00+00:00"),
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, max_loss=1648.0, max_gain=352.0,
+                   timestamp="2026-09-02T17:47:00+00:00"),
+        ]
+        spread = pos_mod.reconcile(legs, decisions)[0][0]
+        assert spread.max_loss == pytest.approx(3308.0)
+        assert spread.max_gain == pytest.approx(692.0)
+
+    def test_a_partial_close_scales_the_total_down(self):
+        """Half the contracts are gone; half the authorised risk is off."""
+        legs = [leg(CREDIT_LONG, 4), leg(CREDIT_SHORT, -4)]
+        decisions = [
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, max_loss=1660.0, timestamp="2026-09-01T17:23:00+00:00"),
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, max_loss=1648.0, timestamp="2026-09-02T17:47:00+00:00"),
+        ]
+        spread = pos_mod.reconcile(legs, decisions)[0][0]
+        assert spread.qty == 4
+        assert spread.max_loss == pytest.approx(1654.0)
 
 
 class TestProfitFraction:
@@ -197,6 +237,40 @@ class TestExcessSize:
         spread = self._spread(on=12, approved=4)
         assert spread.approved_qty == 4
         assert spread.excess_qty == 8
+
+    def test_a_second_approved_entry_at_the_same_strikes_is_not_an_excess(self):
+        """The false alarm this check produced on 2026-09-02.
+
+        AAPL 260925 P305/P310 was opened for 4 contracts on two consecutive
+        days, both separately approved. Taking only the newest record as the
+        ceiling called the other four an over-fill and told an operator to trim
+        a position no gate objected to. A false alarm that recommends closing
+        contracts is worse than no alarm: acting on it loses money, and after
+        one of them nobody believes the next real one.
+        """
+        legs = [leg(CREDIT_LONG, 8), leg(CREDIT_SHORT, -8)]
+        decisions = [
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, max_loss=1660.0, timestamp="2026-09-01T17:23:00+00:00"),
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, max_loss=1648.0, timestamp="2026-09-02T17:47:00+00:00"),
+        ]
+        spread = pos_mod.reconcile(legs, decisions)[0][0]
+        assert spread.approved_qty == 8
+        assert spread.excess_qty == 0
+
+    def test_an_over_fill_on_top_of_two_entries_is_still_caught(self):
+        """Summing the ceiling must not blind the check entirely."""
+        legs = [leg(CREDIT_LONG, 20), leg(CREDIT_SHORT, -20)]
+        decisions = [
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, timestamp="2026-09-01T17:23:00+00:00"),
+            opened("AAPL", "bull_put_credit", CREDIT_LONG, CREDIT_SHORT,
+                   qty=4, timestamp="2026-09-02T17:47:00+00:00"),
+        ]
+        spread = pos_mod.reconcile(legs, decisions)[0][0]
+        assert spread.approved_qty == 8
+        assert spread.excess_qty == 12
 
     def test_the_risk_reported_is_the_risk_on_not_the_risk_approved(self):
         """Three times the position is three times the worst case, and the

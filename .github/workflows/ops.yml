@@ -27,7 +27,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  # `trim` and `cancel-open-orders` write closing records to the journal, and
+  # a record that only exists on the runner is not an audit trail. The first
+  # trim, on 2026-09-01, wrote three of them and every one was discarded when
+  # the job ended — the README claimed the whole incident was in the committed
+  # log while the closing half of it had never left the container.
+  contents: write
 
 jobs:
   run:
@@ -55,3 +60,24 @@ jobs:
         run: |
           python scripts/ops.py "${{ inputs.command }}" \
             ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit any records this produced
+        # `report` writes nothing and exits here; the others may have written
+        # closing records. `if: always()` so a failed cleanup still commits what
+        # it managed to do — that is the run whose record matters most.
+        if: always()
+        run: |
+          git config user.name  "trading-bot"
+          git config user.email "trading-bot@users.noreply.github.com"
+          git add logs/
+          if git diff --staged --quiet; then
+            echo "no new records"
+            exit 0
+          fi
+          git commit -m "chore(logs): ops ${{ inputs.command }} $(date -u +%Y-%m-%dT%H:%MZ) [bot]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push origin main && exit 0
+            sleep $((i * 5))
+          done
+          echo "could not push records after 5 attempts" >&2
+          exit 1
