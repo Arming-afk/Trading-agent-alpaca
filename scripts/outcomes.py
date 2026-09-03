@@ -94,7 +94,17 @@ def main(argv=None) -> int:
     positions, orders = ([], {}) if args.offline else _broker_state()
     rows = outcomes.build(decisions, positions, orders)
     summary = outcomes.summarise(rows)
-    outcomes.write(rows, summary)
+
+    # An offline run must not overwrite the committed report. It produces a
+    # strictly poorer version of the same file — every row unresolved, because
+    # it could not ask the account — and writing that over a report built from
+    # live marks replaces answers with the absence of answers, in a file that
+    # then gets committed.
+    if summary["broker_data"]:
+        outcomes.write(rows, summary)
+    else:
+        print(f"! offline: leaving {config.LOGS / 'outcomes.jsonl'} untouched",
+              file=sys.stderr)
 
     if args.json:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
@@ -106,19 +116,26 @@ def main(argv=None) -> int:
     print(_table(rows))
     print()
 
-    fill_rate = summary["fill_rate"]
-    print(f"  Submitted {summary['trades_submitted']}, filled {summary['filled']}"
-          + (f", never filled {summary['unfilled']}" if summary["unfilled"] else "")
-          + (f"  ({fill_rate:.0%} fill rate)" if fill_rate is not None else ""))
-    print(f"  Total P&L on filled positions: ${summary['total_pl']:,.2f}")
-    print()
+    if not summary["broker_data"]:
+        # Every count below depends on the account. Printing them as zeros
+        # would state as fact the one thing this run could not determine.
+        print(f"  Submitted {summary['trades_submitted']}. Fills, P&L and "
+              f"outcomes are unknown without the broker.")
+        print()
+    else:
+        fill_rate = summary["fill_rate"]
+        print(f"  Submitted {summary['trades_submitted']}, filled {summary['filled']}"
+              + (f", never filled {summary['unfilled']}" if summary["unfilled"] else "")
+              + (f"  ({fill_rate:.0%} fill rate)" if fill_rate is not None else ""))
+        print(f"  Total P&L on filled positions: ${summary['total_pl']:,.2f}")
+        print()
 
-    for label, bucket in summary["by_stance"].items():
-        ror = bucket["return_on_risk"]
-        ror_text = f"{ror:+.1%} on risk" if ror is not None else "no resolved risk"
-        print(f"  {label:<14} {bucket['resolved']} resolved of {bucket['trades']}"
-              f"  ·  ${bucket['pl']:+,.0f}  ·  {ror_text}")
-    print()
+        for label, bucket in summary["by_stance"].items():
+            ror = bucket["return_on_risk"]
+            ror_text = f"{ror:+.1%} on risk" if ror is not None else "no resolved risk"
+            print(f"  {label:<14} {bucket['resolved']} resolved of {bucket['trades']}"
+                  f"  ·  ${bucket['pl']:+,.0f}  ·  {ror_text}")
+        print()
 
     stale = outcomes.expired_today(rows, date.today())
     if stale:
@@ -127,12 +144,13 @@ def main(argv=None) -> int:
             print(f"      {o.symbol} {o.kind} exp {o.expiration}")
         print()
 
-    print("  THE FALSIFICATION TEST")
+    print("  THE FALSIFICATION TEST" if summary["broker_data"] else "  WHAT THIS RUN CAN SAY")
     for line in _wrap(summary["verdict"], 74):
         print(f"  {line}")
     print()
-    print(f"  written to {(config.LOGS / 'outcomes.jsonl')}")
-    print()
+    if summary["broker_data"]:
+        print(f"  written to {(config.LOGS / 'outcomes.jsonl')}")
+        print()
     return 0
 
 

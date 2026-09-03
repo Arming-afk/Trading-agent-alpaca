@@ -32,10 +32,18 @@ st.set_page_config(page_title="Options Alpha Agent", page_icon="📈",
 # ── data ─────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
-def load_logs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    decisions = pd.DataFrame(journal.read(config.DECISIONS_LOG))
+def load_logs() -> tuple[pd.DataFrame, pd.DataFrame, list[dict]]:
+    """Frames for display, and the raw records for the agent modules.
+
+    `agent.positions` and `agent.outcomes` take lists of dicts. Handing either
+    of them a DataFrame does not raise where you would expect it to — iterating
+    a frame yields its column names, so the loop runs over strings and fails on
+    the first `.get`. Returning both shapes keeps that mistake out of reach.
+    """
+    records = journal.read(config.DECISIONS_LOG)
+    decisions = pd.DataFrame(records)
     runs = pd.DataFrame(journal.read(config.RUNS_LOG))
-    return decisions, runs
+    return decisions, runs, records
 
 
 @st.cache_data(ttl=30)
@@ -158,7 +166,7 @@ def regime_chart(scan: pd.DataFrame) -> go.Figure | None:
 
 # ── page ─────────────────────────────────────────────────────────────────────
 
-decisions, runs = load_logs()
+decisions, runs, decision_records = load_logs()
 live = load_live()
 scan = flatten_regime(decisions)
 
@@ -179,7 +187,7 @@ if live:
     # sum of the legs' cost bases. For a credit spread the two are unrelated:
     # the cost basis is the credit collected, the risk is the width less that
     # credit. See agent/positions.py.
-    open_spreads, unexplained = pos_mod.reconcile(positions, decisions)
+    open_spreads, unexplained = pos_mod.reconcile(positions, decision_records)
     open_risk = pos_mod.open_risk(open_spreads)
 
     c1, c2, c3, c4 = st.columns(4)
@@ -291,7 +299,7 @@ st.caption(
 )
 
 trade_rows = outcomes_mod.build(
-    decisions,
+    decision_records,
     live["positions"] if live else [],
     {},
 )
@@ -302,10 +310,19 @@ else:
     summary = outcomes_mod.summarise(trade_rows)
     o1, o2, o3 = st.columns(3)
     o1.metric("Submitted", summary["trades_submitted"])
-    o2.metric("Filled", summary["filled"],
+    # Fills and P&L are the account's answer, not the journal's. Without the
+    # CLI this panel shows what was sent and says the rest is unknown, rather
+    # than rendering an absence of data as a zero.
+    o2.metric("Filled", summary["filled"] if summary["broker_data"] else "—",
               f"{summary['fill_rate']:.0%} fill rate"
               if summary["fill_rate"] is not None else None)
-    o3.metric("P&L on filled", f"${summary['total_pl']:,.2f}")
+    o3.metric("P&L on filled",
+              f"${summary['total_pl']:,.2f}" if summary["broker_data"] else "—")
+    if not summary["broker_data"]:
+        st.caption(
+            "The Alpaca CLI is not available here, so fills and P&L cannot be "
+            "read. The table below shows what was decided and sent."
+        )
 
     st.dataframe(
         pd.DataFrame([{

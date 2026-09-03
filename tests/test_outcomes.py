@@ -231,3 +231,50 @@ class TestNettedEntries:
     def test_the_stance_bucket_no_longer_double_counts(self):
         buckets = outcomes.by_stance(self._rows())
         assert buckets["sell_premium"].pl == pytest.approx(-196.0)
+
+
+class TestOfflineHonesty:
+    """A run with no broker view knows what was sent, not what happened.
+
+    Reporting "filled 0, 0% fill rate" from an offline run states as fact the
+    one thing that run could not determine. The account had filled all seven.
+    """
+
+    def _offline(self):
+        return outcomes.build(
+            [opened("AAPL", "bull_put_credit", "sell_premium", 1.41, LONG, SHORT)],
+            [], {})
+
+    def test_counts_that_need_the_broker_are_none_not_zero(self):
+        s = outcomes.summarise(self._offline())
+        assert s["broker_data"] is False
+        assert s["filled"] is None
+        assert s["fill_rate"] is None
+        assert s["total_pl"] is None
+
+    def test_the_verdict_declines_rather_than_concluding(self):
+        assert "knows what was sent" in outcomes.summarise(self._offline())["verdict"]
+
+    def test_the_count_of_what_was_sent_is_still_reported(self):
+        """The journal does know that much, and it is the useful half."""
+        assert outcomes.summarise(self._offline())["trades_submitted"] == 1
+
+    def test_a_broker_view_restores_the_real_numbers(self):
+        rows = outcomes.build(
+            [opened("AAPL", "bull_put_credit", "sell_premium", 1.41, LONG, SHORT)],
+            [leg(LONG, 9, -120), leg(SHORT, -9, 400)], {})
+        s = outcomes.summarise(rows)
+        assert s["broker_data"] is True
+        assert s["filled"] == 1
+        assert s["total_pl"] == pytest.approx(280.0)
+
+    def test_one_known_row_is_enough_to_report(self):
+        """A partial broker view is still a view — only a total absence of one
+        makes the counts unanswerable."""
+        rows = outcomes.build(
+            [opened("AAPL", "bull_put_credit", "sell_premium", 1.41, LONG, SHORT,
+                    order_id="a"),
+             opened("QQQ", "bear_put_debit", "buy_premium", 0.81, "L", "S",
+                    order_id="b")],
+            [leg(LONG, 9, -120), leg(SHORT, -9, 400)], {})
+        assert outcomes.summarise(rows)["broker_data"] is True

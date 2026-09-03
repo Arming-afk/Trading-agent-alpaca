@@ -326,18 +326,39 @@ def verdict(outcomes: list[Outcome]) -> str:
             f"sufficient to establish it.")
 
 
+def saw_the_broker(outcomes: list[Outcome]) -> bool:
+    """Whether this report had a broker view to join against.
+
+    Without one every row is UNRESOLVED — the journal knows an order was sent
+    and nothing else. That is a different thing from knowing the orders did not
+    fill, and the difference has to survive into the summary: reporting "filled
+    0, 0% fill rate" off an offline run states as fact the one thing the run
+    could not determine. The account had filled all seven.
+    """
+    return any(o.status != UNRESOLVED for o in outcomes)
+
+
 def summarise(outcomes: list[Outcome]) -> dict:
-    """The whole report as one record, for the log and the dashboard."""
+    """The whole report as one record, for the log and the dashboard.
+
+    Counts that depend on the broker are None when the broker was not
+    consulted, never zero.
+    """
     resolved = [o for o in outcomes if o.resolved]
+    known = saw_the_broker(outcomes)
     return {
         "generated": journal.now_iso(),
         "trades_submitted": len(outcomes),
-        "filled": len(resolved),
-        "unfilled": sum(1 for o in outcomes if o.status == UNFILLED),
-        "fill_rate": (round(len(resolved) / len(outcomes), 4) if outcomes else None),
-        "total_pl": round(sum(o.pl for o in resolved), 2),
+        "broker_data": known,
+        "filled": len(resolved) if known else None,
+        "unfilled": sum(1 for o in outcomes if o.status == UNFILLED) if known else None,
+        "fill_rate": (round(len(resolved) / len(outcomes), 4)
+                      if known and outcomes else None),
+        "total_pl": round(sum(o.pl for o in resolved), 2) if known else None,
         "by_stance": {k: b.as_log() for k, b in by_stance(outcomes).items()},
-        "verdict": verdict(outcomes),
+        "verdict": verdict(outcomes) if known else
+                   "No broker view — this run knows what was sent, not what "
+                   "happened. Run without --offline to join the account.",
     }
 
 
