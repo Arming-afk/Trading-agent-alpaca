@@ -130,9 +130,10 @@ is the notification.
 
 ## What the live account taught us
 
-Seven defects survived 175 unit tests and a dry run. All four needed a real
-account, and they are in the README with their fixes because the failure modes
-transfer better than the strategy does.
+Seven defects reached a live account. Four survived 175 unit tests and a dry
+run; the other three were in the code written to fix those four, and were
+caught the next session. All of them are in the README with their fixes,
+because the failure modes transfer better than the strategy does.
 
 The sharpest was an execution failure. `order cancel` rejected a positional id;
 during a chased run six cancels failed while the chase sent a more aggressive
