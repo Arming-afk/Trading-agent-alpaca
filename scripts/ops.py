@@ -79,6 +79,11 @@ def cmd_report() -> int:
     spreads, unexplained = pos_mod.reconcile(legs, journal.read(config.DECISIONS_LOG))
 
     print()
+    # The account number belongs in the report. It is what a submission form,
+    # a support ticket and a judge all ask for, and reading it off a document
+    # someone typed once is how the wrong account gets verified.
+    print(f"  account {account.get('account_number') or '(unknown)'}   "
+          f"status {account.get('status') or '(unknown)'}")
     print(f"  equity ${equity:,.2f}   cash ${float(account.get('cash') or 0):,.2f}")
     print(f"  {len(legs)} option leg(s) -> {len(spreads)} spread(s), "
           f"${pos_mod.open_risk(spreads):,.0f} at risk "
